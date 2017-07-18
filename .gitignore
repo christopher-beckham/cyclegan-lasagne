@@ -1,0 +1,7 @@
+slurm*.out
+.fuse*
+*.png
+*.pdf
+*.pyc
+*.py~
+log/
