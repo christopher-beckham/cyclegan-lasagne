@@ -27,8 +27,10 @@ class CycleGAN():
             print layer, layer.output_shape, "" if not hasattr(layer, 'nonlinearity') else layer.nonlinearity
         print "# learnable params:", count_params(layer, trainable=True)
     def __init__(self,
-                 gen_fn_p2p, disc_fn_p2p,
-                 gen_params_p2p, disc_params_p2p,
+                 gen_fn_atob, disc_fn_a,
+                 gen_params_atob, disc_params_a,
+                 gen_fn_btoa, disc_fn_b,
+                 gen_params_btoa, disc_params_b,
                  in_shp, is_a_grayscale, is_b_grayscale,
                  alpha_atob=100, alpha_btoa=100, opt=adam, opt_args={'learning_rate':theano.shared(floatX(1e-3))},
                  reconstruction='l1', lsgan=False, verbose=True):
@@ -37,12 +39,12 @@ class CycleGAN():
         self.in_shp = in_shp
         self.verbose = verbose
         # get the networks for the p2p network
-        gen_atob = gen_fn_p2p(in_shp, is_a_grayscale, is_b_grayscale, **gen_params_p2p)
-        gen_btoa = gen_fn_p2p(in_shp, is_b_grayscale, is_a_grayscale, **gen_params_p2p)
+        gen_atob = gen_fn_atob(in_shp, is_a_grayscale, is_b_grayscale, **gen_params_atob)
+        gen_btoa = gen_fn_btoa(in_shp, is_b_grayscale, is_a_grayscale, **gen_params_btoa)
         # is A real or generated?
-        disc_a = disc_fn_p2p(in_shp, is_a_grayscale, **disc_params_p2p)
+        disc_a = disc_fn_a(in_shp, is_a_grayscale, **disc_params_a)
         # is B real or generated?
-        disc_b = disc_fn_p2p(in_shp, is_b_grayscale, **disc_params_p2p)        
+        disc_b = disc_fn_b(in_shp, is_b_grayscale, **disc_params_b)
         if verbose:
             self._print_network(gen_atob)
             self._print_network(disc_a)
@@ -200,11 +202,11 @@ class CycleGAN():
             plot_grid("%s/atob_%i.png" % (out_dir,e+1), it_val, self.atob_fn, invert=False, is_a_grayscale=self.is_a_grayscale, is_b_grayscale=self.is_b_grayscale)
             plot_grid("%s/btoa_%i.png" % (out_dir,e+1), it_val, self.btoa_fn, invert=True, is_a_grayscale=self.is_a_grayscale, is_b_grayscale=self.is_b_grayscale)
             # plot big pictures of predict(A) in the valid set
-            self.generate_atobs(it_train, 1, "%s/dump_train" % out_dir, deterministic=False)
-            self.generate_atobs(it_val, 1, "%s/dump_valid" % out_dir, deterministic=False)
+            self.generate_atobs(it_train, 1, batch_size, "%s/dump_train" % out_dir, deterministic=False)
+            self.generate_atobs(it_val, 1, batch_size, "%s/dump_valid" % out_dir, deterministic=False)
             if model_dir != None and (e+1) % save_every == 0:
                 self.save_model("%s/%i.model" % (model_dir, e+1))
-    def generate_atobs(self, itr, num_examples, out_dir, deterministic=True):
+    def generate_atobs(self, itr, num_examples, batch_size, out_dir, deterministic=True):
         if deterministic:
             atob_fn, btoa_fn = self.atob_fn_det, self.btoa_fn_det
         else:
@@ -213,7 +215,7 @@ class CycleGAN():
             os.makedirs(out_dir)
         from skimage.io import imsave
         ctr = 0
-        for n in range(num_batches):
+        for n in range(num_examples // batch_size):
             this_a, this_b = itr.next()
             pred_b = atob_fn(this_a) # A --> B
             pred_a = btoa_fn(this_b) # B --> A
@@ -374,6 +376,35 @@ if __name__ == '__main__':
         if mode == "train":
             model.train(it_train, it_val, batch_size=bs, num_epochs=1000, out_dir="output/%s" % name, model_dir="models/%s" % name,
                         schedule={100: 2e-6}, resume=True)
+
+    # i think d=0.5 is only good for a->b, for b->a it was terrible
+    def test2_atob10_btoa10_repp_dropout(mode):
+        model = CycleGAN(
+            gen_fn_atob=p2p.g_unet,
+            disc_fn_a=p2p.discriminator,
+            gen_params_atob={'nf':64, 'num_repeats':0, 'bilinear_upsample':True, 'dropout':True},
+            disc_params_a={'nf':32, 'bn':False, 'num_repeats':0, 'act':linear, 'mul_factor':[1,2,4,8]},
+            
+            gen_fn_btoa=p2p.g_unet,
+            disc_fn_b=p2p.discriminator,
+            gen_params_btoa={'nf':64, 'num_repeats':0, 'bilinear_upsample':True, 'dropout':False},
+            disc_params_b={'nf':32, 'bn':False, 'num_repeats':0, 'act':linear, 'mul_factor':[1,2,4,8]},
+            
+            in_shp=512,
+            is_a_grayscale=True,
+            is_b_grayscale=False,
+            alpha_atob=10,
+            alpha_btoa=10,
+            lsgan=True,
+            opt=adam,
+            opt_args={'learning_rate':theano.shared(floatX(2e-4))},
+        )
+        bs = 1
+        it_train, it_val = get_iterators(dest_file, bs, True, False, True)
+        name = "deleteme2_withvalid_atob10_btoa10_repp_dropout"
+        if mode == "train":
+            model.train(it_train, it_val, batch_size=bs, num_epochs=1000, out_dir="output/%s" % name, model_dir="models/%s" % name,
+                        schedule={100: 2e-5, 200: 2e-6}, resume=True)
 
             
     locals()[ sys.argv[1] ]( sys.argv[2] )
