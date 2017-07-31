@@ -19,7 +19,7 @@ import pickle
 import sys
 import gzip
 
-from util import iterate_hdf5, Hdf5Iterator, convert_to_rgb, compose_imgs, plot_grid
+from util import convert_to_rgb, compose_imgs, plot_grid
 
 class CycleGAN():
     def _print_network(self,l_out):
@@ -33,7 +33,7 @@ class CycleGAN():
                  gen_params_btoa, disc_params_b,
                  in_shp, is_a_grayscale, is_b_grayscale,
                  alpha_atob=100, alpha_btoa=100, opt=adam, opt_args={'learning_rate':theano.shared(floatX(1e-3))},
-                 reconstruction='l1', lsgan=False, verbose=True):
+                 reconstruction='l1', lsgan=False, no_gan=False, verbose=True):
         self.is_a_grayscale = is_a_grayscale
         self.is_b_grayscale = is_b_grayscale
         self.in_shp = in_shp
@@ -83,6 +83,9 @@ class CycleGAN():
         # forward cycle consistency loss
         atob_gen_cycle_loss = T.abs_(A-atob['cycle']).mean()
         atob_gen_total_loss = atob_gen_loss + alpha_atob*atob_gen_cycle_loss
+        if no_gan:
+            # if we turn off the GAN, we should only do cycle loss
+            atob_gen_total_loss = atob_gen_cycle_loss 
         ## btoa losses
         # adversarial loss
         btoa_disc_loss = adv_loss(btoa['disc_out_real'], 1.).mean() + adv_loss(btoa['disc_out_fake'], 0.).mean()
@@ -90,6 +93,9 @@ class CycleGAN():
         # backward cycle consistency loss
         btoa_gen_cycle_loss = T.abs_(B-btoa['cycle']).mean()
         btoa_gen_total_loss = btoa_gen_loss + alpha_btoa*btoa_gen_cycle_loss ####
+        if no_gan:
+            # if we turn off the GAN, we should only do cycle loss
+            btoa_gen_total_loss = btoa_gen_cycle_loss
         ## params
         # atob params
         gen_params_atob = get_all_params(atob['gen'], trainable=True)
@@ -101,16 +107,17 @@ class CycleGAN():
         if self.verbose:
             print "creating updates..."
         updates = opt(atob_gen_total_loss, gen_params_atob, **opt_args) # update atob generator
-        updates.update(opt(atob_disc_loss, disc_params_atob, **opt_args)) # update atob disc
+        if not no_gan:
+            updates.update(opt(atob_disc_loss, disc_params_atob, **opt_args)) # update atob disc
         updates.update(opt(btoa_gen_total_loss, gen_params_btoa, **opt_args)) # update btoa generator
-        updates.update(opt(btoa_disc_loss, disc_params_btoa, **opt_args)) # update btoa disc
+        if not no_gan:
+            updates.update(opt(btoa_disc_loss, disc_params_btoa, **opt_args)) # update btoa disc
         # do da functions
         if self.verbose:
             print "creating fns..."
-        train_fn = theano.function([A,B], [atob_gen_loss, atob_gen_cycle_loss, atob_disc_loss,
-                                             btoa_gen_loss, btoa_gen_cycle_loss, btoa_disc_loss], updates=updates, on_unused_input='warn')
-        loss_fn = theano.function([A,B], [atob_gen_loss, atob_gen_cycle_loss, atob_disc_loss,
-                                             btoa_gen_loss, btoa_gen_cycle_loss, btoa_disc_loss], on_unused_input='warn')
+        fn_keys = [atob_gen_loss, atob_gen_cycle_loss, atob_disc_loss, btoa_gen_loss, btoa_gen_cycle_loss, btoa_disc_loss]
+        train_fn = theano.function([A,B], fn_keys, updates=updates, on_unused_input='warn')
+        loss_fn = theano.function([A,B], fn_keys, on_unused_input='warn')
         atob_fn = theano.function([A], atob['gen_out'])
         btoa_fn = theano.function([B], btoa['gen_out'])
         atob_fn_det = theano.function([A], atob['gen_out_det'])
@@ -119,6 +126,8 @@ class CycleGAN():
         self.loss_fn = loss_fn
         self.atob_fn = atob_fn
         self.btoa_fn = btoa_fn
+        self.atob_fn_det = atob_fn_det
+        self.btoa_fn_det = btoa_fn_det
         self.lr = opt_args['learning_rate']
         self.train_keys = ['atob_gen', 'atob_cycle', 'atob_disc', 'btoa_gen', 'btoa_cycle', 'btoa_disc']
     def save_model(self, filename):
@@ -178,34 +187,51 @@ class CycleGAN():
         if self.verbose:
             print "training..."
         for e in range(num_epochs):
-            if e+1 in schedule:
-                self.lr.set_value( schedule[e+1] )
-            out_str = []
-            out_str.append(str(e+1))
-            t0 = time()
-            # training
-            results = _loop(self.train_fn, it_train)
-            for i in range(len(results)):
-                out_str.append(str(results[i]))
-            if reduce_on_plateau:
-                cb.on_epoch_end(np.mean(recon_losses), e+1)
-            # validation
-            results = _loop(self.loss_fn, it_val)
-            for i in range(len(results)):
-                out_str.append(str(results[i]))
-            out_str.append(str(cb.learning_rate.get_value()))
-            out_str.append(str(time()-t0))
-            out_str = ",".join(out_str)
-            print out_str
-            f.write("%s\n" % out_str); f.flush()
-            # plot nice grids
-            plot_grid("%s/atob_%i.png" % (out_dir,e+1), it_val, self.atob_fn, invert=False, is_a_grayscale=self.is_a_grayscale, is_b_grayscale=self.is_b_grayscale)
-            plot_grid("%s/btoa_%i.png" % (out_dir,e+1), it_val, self.btoa_fn, invert=True, is_a_grayscale=self.is_a_grayscale, is_b_grayscale=self.is_b_grayscale)
-            # plot big pictures of predict(A) in the valid set
-            self.generate_atobs(it_train, 1, batch_size, "%s/dump_train" % out_dir, deterministic=False)
-            self.generate_atobs(it_val, 1, batch_size, "%s/dump_valid" % out_dir, deterministic=False)
-            if model_dir != None and (e+1) % save_every == 0:
-                self.save_model("%s/%i.model" % (model_dir, e+1))
+            try:
+                if e+1 in schedule:
+                    self.lr.set_value( schedule[e+1] )
+                out_str = []
+                out_str.append(str(e+1))
+                t0 = time()
+                # training
+                results = _loop(self.train_fn, it_train)
+                for i in range(len(results)):
+                    out_str.append(str(results[i]))
+                if reduce_on_plateau:
+                    cb.on_epoch_end(np.mean(recon_losses), e+1)
+                # validation
+                results = _loop(self.loss_fn, it_val)
+                for i in range(len(results)):
+                    out_str.append(str(results[i]))
+                out_str.append(str(cb.learning_rate.get_value()))
+                out_str.append(str(time()-t0))
+                out_str = ",".join(out_str)
+                print out_str
+                f.write("%s\n" % out_str); f.flush()
+                dump_train = "%s/dump_train" % out_dir
+                dump_valid = "%s/dump_valid" % out_dir
+                for path in [dump_train, dump_valid]:
+                    if not os.path.exists(path):
+                        os.makedirs(path)
+                # plot nice grids
+                plot_grid("%s/atob_%i.png" % (out_dir,e+1), it_val, self.atob_fn, invert=False, is_a_grayscale=self.is_a_grayscale, is_b_grayscale=self.is_b_grayscale)
+                plot_grid("%s/btoa_%i.png" % (out_dir,e+1), it_val, self.btoa_fn, invert=True, is_a_grayscale=self.is_a_grayscale, is_b_grayscale=self.is_b_grayscale)
+                # plot big pictures of predict(A) in the valid set
+                #self.generate_atobs(it_train, 1, batch_size, "%s/dump_train" % out_dir, deterministic=False)
+                #self.generate_atobs(it_val, 1, batch_size, "%s/dump_valid" % out_dir, deterministic=False)
+                self.plot(itr=it_train, out_filename="%s/atob_%i.png" % (dump_train, e+1), out_filename_gt="%s/atob_%i_gt.png" % (dump_train, e+1), mode='atob')
+                self.plot(itr=it_train, out_filename="%s/btoa_%i.png" % (dump_train, e+1), out_filename_gt="%s/btoa_%i_gt.png" % (dump_train, e+1), mode='btoa')
+                self.plot(itr=it_val, out_filename="%s/atob_%i.png" % (dump_valid, e+1), out_filename_gt="%s/atob_%i_gt.png" % (dump_valid, e+1), mode='atob')
+                self.plot(itr=it_val, out_filename="%s/btoa_%i.png" % (dump_valid, e+1), out_filename_gt="%s/btoa_%i_gt.png" % (dump_valid, e+1), mode='btoa')
+                #filename = "%s/%s_%i.png" % (out_dir, mode, epoch)
+                #filename_gt = "%s/%s_%i_gt.png" % (out_dir, mode, epoch)
+
+                if model_dir != None and (e+1) % save_every == 0:
+                    self.save_model("%s/%i.model" % (model_dir, e+1))
+            except KeyboardInterrupt:
+                import pdb
+                pdb.set_trace()
+    '''
     def generate_atobs(self, itr, num_examples, batch_size, out_dir, deterministic=True):
         if deterministic:
             atob_fn, btoa_fn = self.atob_fn_det, self.btoa_fn_det
@@ -227,184 +253,47 @@ class CycleGAN():
                 ctr += 1
                 if ctr == num_examples:
                     break
-
-def get_iterators(dataset, batch_size, is_a_grayscale, is_b_grayscale, da=True):
-    dataset = h5py.File(dataset,"r")
-    if da:
-        imgen = ImageDataGenerator(horizontal_flip=True, vertical_flip=True, rotation_range=360, fill_mode="reflect")
-    else:
-        imgen = ImageDataGenerator()
-    it_train = Hdf5Iterator(dataset['xt'], dataset['yt'], batch_size, imgen, is_a_grayscale=is_a_grayscale, is_b_grayscale=is_b_grayscale)
-    it_val = Hdf5Iterator(dataset['xv'], dataset['yv'], batch_size, imgen, is_a_grayscale=is_a_grayscale, is_b_grayscale=is_b_grayscale)
-    return it_train, it_val
-                
-if __name__ == '__main__':
-    from architectures import p2p
-    import shutil
-
-    def copy_if_not_exist(dest_file, from_file):
-        dirname = os.path.dirname(dest_file)
-        if not os.path.isfile(dest_file):
-            print "copying data from %s to %s" % (from_file, dest_file)
-            if not os.path.exists(dirname):
-                os.makedirs(dirname)
-            shutil.copy(src=from_file, dst=dest_file)
-
-    # desert h5 file
-    # no valid set for this one
-    #dest_file, from_file = "/Tmp/beckhamc/hdf5/textures_v2_brown500.h5", "/data/lisa/data/cbeckham/textures_v2_brown500.h5"
-    dest_file, from_file = "/Tmp/beckhamc/hdf5/textures_v2_brown500_with_valid.h5", "/data/lisa/data/cbeckham/textures_v2_brown500_with_valid.h5"    
-    copy_if_not_exist(dest_file=dest_file, from_file=from_file)
-            
-    def test1(mode):
-        nf_p, nf_d = 64, 64 #64...
-        model = CycleGAN(
-            gen_fn_p2p=p2p.g_unet,
-            disc_fn_p2p=p2p.discriminator,
-            gen_params_p2p={'nf':nf_p, 'act':tanh, 'num_repeats':0, 'bilinear_upsample':True},
-            disc_params_p2p={'nf':nf_d, 'bn':False, 'num_repeats':0, 'act':linear, 'mul_factor':[1,2,4,8]},
-            in_shp=512,
-            is_a_grayscale=True,
-            is_b_grayscale=False,
-            lsgan=True,
-            opt=rmsprop,
-            opt_args={'learning_rate':theano.shared(floatX(1e-4))},
-        )
-        bs = 4
-        it_train, it_val = get_iterators(dest_file, bs, True, False, True)
-        name = "deleteme"
-        if mode == "train":
-            model.train(it_train, it_val, batch_size=bs, num_epochs=1000, out_dir="output/%s" % name, model_dir="models/%s" % name)
-
-    # alpha=1 does well but the outputs can look 'chromatic'
-    # maybe we should find a good value in [1,100]
-    # (100 weakens the generator too much)
-    #
-    # NOTE: the training is pix2pix style, we get pairs [a,b]...????????
-    def test2_alpha50(mode):
-        model = CycleGAN(
-            gen_fn_p2p=p2p.g_unet,
-            disc_fn_p2p=p2p.discriminator,
-            gen_params_p2p={'nf':64, 'num_repeats':0, 'bilinear_upsample':True},
-            disc_params_p2p={'nf':32, 'bn':False, 'num_repeats':0, 'act':linear, 'mul_factor':[1,2,4,8]},
-            in_shp=512,
-            is_a_grayscale=True,
-            is_b_grayscale=False,
-            alpha_atob=60,
-            alpha_btoa=10,
-            lsgan=True,
-            opt=rmsprop,
-            opt_args={'learning_rate':theano.shared(floatX(1e-4))},
-        )
-        # alpha=10 is good for b->a
-        # alpha=30 is still kinda weird.... for a->b
-        bs = 4
-        it_train, it_val = get_iterators(dest_file, bs, True, False, True)
-        name = "deleteme2_withvalid_atob60_btoa10"
-        if mode == "train":
-            model.train(it_train, it_val, batch_size=bs, num_epochs=1000, out_dir="output/%s" % name, model_dir="models/%s" % name)
-
-
-
-
-    def test2_atob70_btoa10(mode):
-        model = CycleGAN(
-            gen_fn_p2p=p2p.g_unet,
-            disc_fn_p2p=p2p.discriminator,
-            gen_params_p2p={'nf':64, 'num_repeats':0, 'bilinear_upsample':True},
-            disc_params_p2p={'nf':32, 'bn':False, 'num_repeats':0, 'act':linear, 'mul_factor':[1,2,4,8]},
-            in_shp=512,
-            is_a_grayscale=True,
-            is_b_grayscale=False,
-            alpha_atob=70,
-            alpha_btoa=10,
-            lsgan=True,
-            opt=rmsprop,
-            opt_args={'learning_rate':theano.shared(floatX(1e-4))},
-        )
-        # alpha=10 is good for b->a
-        # alpha=30 is still kinda weird.... for a->b
-        bs = 4
-        it_train, it_val = get_iterators(dest_file, bs, True, False, True)
-        name = "deleteme2_withvalid_atob70_btoa10"
-        if mode == "train":
-            model.train(it_train, it_val, batch_size=bs, num_epochs=1000, out_dir="output/%s" % name, model_dir="models/%s" % name)
-
-    def test2_atob75_btoa10(mode):
-        model = CycleGAN(
-            gen_fn_p2p=p2p.g_unet,
-            disc_fn_p2p=p2p.discriminator,
-            gen_params_p2p={'nf':64, 'num_repeats':0, 'bilinear_upsample':True},
-            disc_params_p2p={'nf':32, 'bn':False, 'num_repeats':0, 'act':linear, 'mul_factor':[1,2,4,8]},
-            in_shp=512,
-            is_a_grayscale=True,
-            is_b_grayscale=False,
-            alpha_atob=75,
-            alpha_btoa=10,
-            lsgan=True,
-            opt=rmsprop,
-            opt_args={'learning_rate':theano.shared(floatX(1e-4))},
-        )
-        # alpha=10 is good for b->a
-        # alpha=30 is still kinda weird.... for a->b
-        bs = 4
-        it_train, it_val = get_iterators(dest_file, bs, True, False, True)
-        name = "deleteme2_withvalid_atob75_btoa10"
-        if mode == "train":
-            model.train(it_train, it_val, batch_size=bs, num_epochs=1000, out_dir="output/%s" % name, model_dir="models/%s" % name)
-
-
-    def test2_atob10_btoa10_repp(mode):
-        model = CycleGAN(
-            gen_fn_p2p=p2p.g_unet,
-            disc_fn_p2p=p2p.discriminator,
-            gen_params_p2p={'nf':64, 'num_repeats':0, 'bilinear_upsample':True},
-            disc_params_p2p={'nf':32, 'bn':False, 'num_repeats':0, 'act':linear, 'mul_factor':[1,2,4,8]},
-            in_shp=512,
-            is_a_grayscale=True,
-            is_b_grayscale=False,
-            alpha_atob=10,
-            alpha_btoa=10,
-            lsgan=True,
-            opt=adam,
-            opt_args={'learning_rate':theano.shared(floatX(2e-5))},
-        )
-        bs = 1
-        it_train, it_val = get_iterators(dest_file, bs, True, False, True)
-        name = "deleteme2_withvalid_atob10_btoa10_repp"
-        model.load_model("models/%s/160.model.bak" % name)
-        if mode == "train":
-            model.train(it_train, it_val, batch_size=bs, num_epochs=1000, out_dir="output/%s" % name, model_dir="models/%s" % name,
-                        schedule={100: 2e-6}, resume=True)
-
-    # i think d=0.5 is only good for a->b, for b->a it was terrible
-    def test2_atob10_btoa10_repp_dropout(mode):
-        model = CycleGAN(
-            gen_fn_atob=p2p.g_unet,
-            disc_fn_a=p2p.discriminator,
-            gen_params_atob={'nf':64, 'num_repeats':0, 'bilinear_upsample':True, 'dropout':True},
-            disc_params_a={'nf':32, 'bn':False, 'num_repeats':0, 'act':linear, 'mul_factor':[1,2,4,8]},
-            
-            gen_fn_btoa=p2p.g_unet,
-            disc_fn_b=p2p.discriminator,
-            gen_params_btoa={'nf':64, 'num_repeats':0, 'bilinear_upsample':True, 'dropout':False},
-            disc_params_b={'nf':32, 'bn':False, 'num_repeats':0, 'act':linear, 'mul_factor':[1,2,4,8]},
-            
-            in_shp=512,
-            is_a_grayscale=True,
-            is_b_grayscale=False,
-            alpha_atob=10,
-            alpha_btoa=10,
-            lsgan=True,
-            opt=adam,
-            opt_args={'learning_rate':theano.shared(floatX(2e-4))},
-        )
-        bs = 1
-        it_train, it_val = get_iterators(dest_file, bs, True, False, True)
-        name = "deleteme2_withvalid_atob10_btoa10_repp_dropout"
-        if mode == "train":
-            model.train(it_train, it_val, batch_size=bs, num_epochs=1000, out_dir="output/%s" % name, model_dir="models/%s" % name,
-                        schedule={100: 2e-5, 200: 2e-6}, resume=True)
-
-            
-    locals()[ sys.argv[1] ]( sys.argv[2] )
+    '''
+    def plot(self, itr, out_filename, out_filename_gt, grid_size=10, mode='atob', deterministic=True):
+        assert mode in ['atob', 'btoa']
+        if deterministic:
+            atob_fn, btoa_fn = self.atob_fn_det, self.btoa_fn_det
+        else:
+            atob_fn, btoa_fn = self.atob_fn, self.btoa_fn
+        ############
+        n_channel_a = 1 if self.is_a_grayscale else 3
+        n_channel_b = 1 if self.is_b_grayscale else 3
+        # grid with transformed images
+        in_shp = self.in_shp
+        if mode == 'atob':
+            # a -> b
+            grid = floatX( np.zeros((in_shp*grid_size, in_shp*grid_size, n_channel_b)) )
+            grid_gt = floatX( np.zeros((in_shp*grid_size, in_shp*grid_size, n_channel_a)) )
+        else:
+            # b -> a
+            grid = floatX( np.zeros((in_shp*grid_size, in_shp*grid_size, n_channel_a)) )
+            grid_gt = floatX( np.zeros((in_shp*grid_size, in_shp*grid_size, n_channel_b)) )
+        this_A, this_B = itr.next()
+        ctr = 0
+        for i in range(grid_size):
+            for j in range(grid_size):
+                if ctr == itr.bs:
+                    # if we've used all the imgs in the batch, get a fresh new batch
+                    this_A, this_B = itr.next()
+                    ctr = 0
+                if mode == 'atob':
+                    target = atob_fn(this_A)
+                    grid_gt[i*in_shp:(i+1)*in_shp, j*in_shp:(j+1)*in_shp, :] = convert_to_rgb(this_A[ctr], self.is_a_grayscale)
+                    grid[i*in_shp:(i+1)*in_shp, j*in_shp:(j+1)*in_shp, :] = convert_to_rgb(target[ctr], self.is_b_grayscale)
+                else:
+                    target = btoa_fn(this_B)
+                    grid_gt[i*in_shp:(i+1)*in_shp, j*in_shp:(j+1)*in_shp, :] = convert_to_rgb(this_B[ctr], self.is_b_grayscale)
+                    grid[i*in_shp:(i+1)*in_shp, j*in_shp:(j+1)*in_shp, :] = convert_to_rgb(target[ctr], self.is_a_grayscale)
+                ctr += 1
+        from skimage.io import imsave
+        if grid.shape[-1] == 1:
+            grid = grid[:,:,0]
+        if grid_gt.shape[-1] == 1:
+            grid_gt = grid_gt[:,:,0]
+        imsave(arr=grid,fname=out_filename)
+        imsave(arr=grid_gt,fname=out_filename_gt)
