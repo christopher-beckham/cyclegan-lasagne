@@ -31,7 +31,9 @@ def UpsampleBilinear(layer, f, s=2):
     layer = Convolution(layer, f, s=1)
     return layer
 
-def g_unet_256(in_shp, is_a_grayscale, is_b_grayscale, nf=64, mul_factor=[1,2,4,8,8,8,8,8], u_split=0.25, act=tanh, dropout=0., bilinear_upsample=False, disable_skip=False):
+
+
+def g_unet_256(in_shp, is_a_grayscale, is_b_grayscale, nf=64, mul_factor=[1,2,4,8,8,8,8,8], act=tanh, dropout=0., bilinear_upsample=False, disable_skip=False):
     """
     The UNet in Costa's pix2pix implementation with some added arguments.
     is_a_grayscale:
@@ -48,6 +50,10 @@ def g_unet_256(in_shp, is_a_grayscale, is_b_grayscale, nf=64, mul_factor=[1,2,4,
     else:
         ups = Deconvolution
     i = InputLayer((None, 1 if is_a_grayscale else 3, 256, 256))
+    mf = mul_factor
+    
+
+    
     # 1,2,4,8,8,8,8,8
 
     mf = mul_factor
@@ -85,7 +91,6 @@ def g_unet_256(in_shp, is_a_grayscale, is_b_grayscale, nf=64, mul_factor=[1,2,4,
     conv8 = BatchNormLayer(conv8)
     x = NonlinearityLayer(conv8, nonlinearity=leaky_rectify)
     
-    # nf*8 x 1 x 1
     #dconv1 = Deconvolution(x, nf * 8,
     #                       k=2, s=1)
     dconv1 = Deconvolution(x, nf * mf[6], k=2, s=1)
@@ -143,6 +148,8 @@ def g_unet_256(in_shp, is_a_grayscale, is_b_grayscale, nf=64, mul_factor=[1,2,4,
     out = NonlinearityLayer(dconv9, act)
     
     return out
+
+
 
 def g_unet(in_shp, is_a_grayscale, is_b_grayscale, nf=64, dropout=False, num_repeats=0, bilinear_upsample=False):
     """

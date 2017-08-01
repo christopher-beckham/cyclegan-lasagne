@@ -69,16 +69,22 @@ class Hdf5Iterator():
 
 
 class Hdf5TwoClassIterator():
-    def __init__(self, X, y, bs, imgen, c1, c2, tanh_norm=True, rnd_state=np.random.RandomState(0), debug=False):
+    def __init__(self, X, y, bs, imgen, c1s, c2s, tanh_norm=True, rnd_state=np.random.RandomState(0), debug=False):
         """
         :X: in our case, the heightmaps
         :y: in our case, the textures
-        :bs: batch size
-        :imgen: optional image data generator
+        :bs:
+        :imgen:
+        :c1s:
+        :c2s
         """
         # build the list of indices corresponding to c1, and c2
-        self.idxs_c1 = np.where(y[:]==c1)[0] # e.g. 0..10
-        self.idxs_c2 = np.where(y[:]==c2)[0] # e.g. 10..90
+        self.idxs_c1 = []
+        self.idxs_c2 = []
+        for c1 in c1s:
+            self.idxs_c1 += np.where(y[:]==c1)[0].tolist()
+        for c2 in c2s:
+            self.idxs_c2 += np.where(y[:]==c2)[0].tolist()
         if debug:
             print "idxs_c1", idxs_c1, "length =", len(idxs_c1)
             print "idxs_c2", idxs_c2, "length =", len(idxs_c2)
@@ -99,7 +105,7 @@ class Hdf5TwoClassIterator():
                 self.rnd_state.shuffle(self.slices_for_c1)
                 self.rnd_state.shuffle(self.slices_for_c2)
             for elem1,elem2 in zip(self.slices_for_c1, self.slices_for_c2):
-                this_X, this_Y = self.X[ self.idxs_c1[elem1].tolist() ], self.X[ self.idxs_c2[elem2].tolist() ]
+                this_X, this_Y = self.X[ self.idxs_c1[elem1] ], self.X[ self.idxs_c2[elem2] ]
                 if this_X.shape[0] != this_Y.shape[0]:
                     # batch size mis-match, go to start of while loop
                     break
@@ -195,13 +201,15 @@ if __name__ == '__main__':
         # c1 has latent factor of interest, i.e. Au
         # c2 doesn't have factor of interest, i.e. B0
         it_train = Hdf5TwoClassIterator(X=dataset['xt'], y=dataset['yt'],
-                                     bs=batch_size, imgen=imgen, c1=4, c2=0,
+                                     bs=batch_size, imgen=imgen, c1s=(3,4), c2s=(0,),
                                      rnd_state=np.random.RandomState(0),
                                      tanh_norm=True)
         it_val = Hdf5TwoClassIterator(X=dataset['xv'], y=dataset['yv'],
-                                     bs=batch_size, imgen=imgen, c1=4, c2=0,
+                                     bs=batch_size, imgen=imgen, c1s=(3,4), c2s=(0,),
                                      rnd_state=np.random.RandomState(0),
                                      tanh_norm=True)
         return it_train, it_val
 
     it_train, it_val = get_dr_iterators(8)
+    print it_train.next()
+    print it_val.next()
