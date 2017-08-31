@@ -92,7 +92,7 @@ class CycleGAN():
         atob_gen_total_loss = atob_gen_loss + float(alpha_atob)*atob_gen_cycle_loss
         if no_gan:
             # if we turn off the GAN, we should only do cycle loss
-            atob_gen_total_loss = atob_gen_cycle_loss 
+            atob_gen_total_loss = atob_gen_cycle_loss
         ## btoa losses
         # adversarial loss
         btoa_disc_loss = adv_loss(btoa['disc_out_real'], 1.).mean() + adv_loss(btoa['disc_out_fake'], 0.).mean()
@@ -104,21 +104,18 @@ class CycleGAN():
             # if we turn off the GAN, we should only do cycle loss
             btoa_gen_total_loss = btoa_gen_cycle_loss
         ## params
-        # atob params
-        gen_params_atob = get_all_params(atob['gen'], trainable=True)
-        disc_params_atob = get_all_params(atob['disc'], trainable=True)
-        # pix2pix params
-        gen_params_btoa = get_all_params(btoa['gen'], trainable=True)
-        disc_params_btoa = get_all_params(btoa['disc'], trainable=True)
+        #gen_params_atob = get_all_params(atob['gen'], trainable=True)
+        #disc_params_atob = get_all_params(atob['disc'], trainable=True)
+        #gen_params_btoa = get_all_params(btoa['gen'], trainable=True)
+        #disc_params_btoa = get_all_params(btoa['disc'], trainable=True)
+        gen_params = get_all_params(atob['gen'], trainable=True) + get_all_params(btoa['gen'], trainable=True)
+        disc_params = get_all_params(atob['disc'], trainable=True) + get_all_params(btoa['disc'], trainable=True)
         # do da updates
         if self.verbose:
             print "creating updates..."
-        updates = opt(atob_gen_total_loss, gen_params_atob, **opt_args) # update atob generator
+        updates = opt(atob_gen_total_loss + btoa_gen_total_loss, gen_params, **opt_args) # update generators
         if not no_gan:
-            updates.update(opt(atob_disc_loss, disc_params_atob, **opt_args)) # update atob disc
-        updates.update(opt(btoa_gen_total_loss, gen_params_btoa, **opt_args)) # update btoa generator
-        if not no_gan:
-            updates.update(opt(btoa_disc_loss, disc_params_btoa, **opt_args)) # update btoa disc
+            updates.update(opt(atob_disc_loss + btoa_disc_loss, disc_params, **opt_args)) # update disc
         # do da functions
         if self.verbose:
             print "creating fns..."
@@ -155,7 +152,7 @@ class CycleGAN():
             set_all_param_values(self.atob['disc'], dd['atob']['disc'])                
             set_all_param_values(self.btoa['gen'], dd['btoa']['gen'])
             set_all_param_values(self.btoa['disc'], dd['btoa']['disc'])
-    def train(self, it_train, it_val, batch_size, num_epochs, out_dir, model_dir=None, save_every=10, resume=False, reduce_on_plateau=False, schedule={}, quick_run=False):
+    def train(self, it_train, it_val, batch_size, num_epochs, out_dir, model_dir=None, save_every=10, resume=False, decay_lr=None, schedule={}, quick_run=False):
         def _loop(fn, itr):
             rec = [ [] for i in range(len(self.train_keys)) ]
             for b in range(itr.N // batch_size):
@@ -193,10 +190,18 @@ class CycleGAN():
         cb = ReduceLROnPlateau(self.lr,verbose=self.verbose)
         if self.verbose:
             print "training..."
+        initial_lr = self.lr.get_value()
         for e in range(num_epochs):
             try:
                 if e+1 in schedule:
                     self.lr.set_value( schedule[e+1] )
+                if decay_lr != None:
+                    # min epoch = start decaying after this # of epochs
+                    # max epoch = decay toward zero with this value
+                    min_epoch, max_epoch = decay_lr
+                    if e+1 > min_epoch:
+                        progress = float(e+1) / max_epoch
+                        self.lr.set_value( floatX( initial_lr * (1 - progress) ) )
                 out_str = []
                 out_str.append(str(e+1))
                 t0 = time()
@@ -204,8 +209,6 @@ class CycleGAN():
                 results = _loop(self.train_fn, it_train)
                 for i in range(len(results)):
                     out_str.append(str(results[i]))
-                if reduce_on_plateau:
-                    cb.on_epoch_end(np.mean(recon_losses), e+1)
                 # validation
                 results = _loop(self.loss_fn, it_val)
                 for i in range(len(results)):
@@ -220,51 +223,20 @@ class CycleGAN():
                 for path in [dump_train, dump_valid]:
                     if not os.path.exists(path):
                         os.makedirs(path)
-                # plot nice grids
-                plot_grid("%s/atob_%i.png" % (out_dir,e+1), it_val, self.atob_fn, invert=False, is_a_grayscale=self.is_a_grayscale, is_b_grayscale=self.is_b_grayscale)
-                plot_grid("%s/btoa_%i.png" % (out_dir,e+1), it_val, self.btoa_fn, invert=True, is_a_grayscale=self.is_a_grayscale, is_b_grayscale=self.is_b_grayscale)
                 # plot big pictures of predict(A) in the valid set
-                #self.generate_atobs(it_train, 1, batch_size, "%s/dump_train" % out_dir, deterministic=False)
-                #self.generate_atobs(it_val, 1, batch_size, "%s/dump_valid" % out_dir, deterministic=False)
-                self._plot(itr=it_train, out_filename="%s/atob_%i.png" % (dump_train, e+1), out_filename_gt="%s/atob_%i_gt.png" % (dump_train, e+1), mode='atob')
-                self._plot(itr=it_train, out_filename="%s/btoa_%i.png" % (dump_train, e+1), out_filename_gt="%s/btoa_%i_gt.png" % (dump_train, e+1), mode='btoa')
-                self._plot(itr=it_train, out_filename="%s/atobtoa_%i.png" % (dump_train, e+1), out_filename_gt=None, mode='atobtoa')
+                self._plot(itr=it_train, out_filename="%s/atob_%i.png" % (dump_train, e+1), mode='atob')
+                self._plot(itr=it_train, out_filename="%s/btoa_%i.png" % (dump_train, e+1), mode='btoa')
                 #
-                self._plot(itr=it_val, out_filename="%s/atob_%i.png" % (dump_valid, e+1), out_filename_gt="%s/atob_%i_gt.png" % (dump_valid, e+1), mode='atob')
-                self._plot(itr=it_val, out_filename="%s/btoa_%i.png" % (dump_valid, e+1), out_filename_gt="%s/btoa_%i_gt.png" % (dump_valid, e+1), mode='btoa')
-                self._plot(itr=it_val, out_filename="%s/atobtoa_%i.png" % (dump_valid, e+1), out_filename_gt=None, mode='atobtoa')
-                #filename = "%s/%s_%i.png" % (out_dir, mode, epoch)
-                #filename_gt = "%s/%s_%i_gt.png" % (out_dir, mode, epoch)
+                self._plot(itr=it_val, out_filename="%s/atob_%i.png" % (dump_valid, e+1), mode='atob')
+                self._plot(itr=it_val, out_filename="%s/btoa_%i.png" % (dump_valid, e+1), mode='btoa')
 
                 if model_dir != None and (e+1) % save_every == 0:
                     self.save_model("%s/%i.model" % (model_dir, e+1))
             except KeyboardInterrupt:
                 import pdb
                 pdb.set_trace()
-    '''
-    def generate_atobs(self, itr, num_examples, batch_size, out_dir, deterministic=True):
-        if deterministic:
-            atob_fn, btoa_fn = self.atob_fn_det, self.btoa_fn_det
-        else:
-            atob_fn, btoa_fn = self.atob_fn, self.btoa_fn
-        if not os.path.exists(out_dir):
-            os.makedirs(out_dir)
-        from skimage.io import imsave
-        ctr = 0
-        for n in range(num_examples // batch_size):
-            this_a, this_b = itr.next()
-            pred_b = atob_fn(this_a) # A --> B
-            pred_a = btoa_fn(this_b) # B --> A
-            for i in range(pred_a.shape[0]):
-                pred_b_processed = convert_to_rgb(pred_b[i], is_grayscale=self.is_b_grayscale)
-                pred_a_processed = convert_to_rgb(pred_a[i], is_grayscale=self.is_a_grayscale)
-                imsave(fname="%s/%i.a.png" % (out_dir, ctr), arr=pred_a_processed)
-                imsave(fname="%s/%i.b.png" % (out_dir, ctr), arr=pred_b_processed)
-                ctr += 1
-                if ctr == num_examples:
-                    break
-    '''
-    def _plot(self, itr, out_filename, out_filename_gt, grid_size=10, mode='atob', deterministic=True):
+
+    def _plot(self, itr, out_filename, grid_size=5, mode='atob', deterministic=True):
         assert mode in ['atob', 'btoa', 'atobtoa']
         if deterministic:
             atob_fn, btoa_fn = self.atob_fn_det, self.btoa_fn_det
@@ -275,45 +247,34 @@ class CycleGAN():
         n_channel_b = 1 if self.is_b_grayscale else 3
         # grid with transformed images
         in_shp = self.in_shp
-        if mode == 'atob':
-            # a -> b
-            grid = floatX( np.zeros((in_shp*grid_size, in_shp*grid_size, n_channel_b)) )
-            grid_gt = floatX( np.zeros((in_shp*grid_size, in_shp*grid_size, n_channel_a)) )
-        elif mode == 'btoa':
-            # b -> a
-            grid = floatX( np.zeros((in_shp*grid_size, in_shp*grid_size, n_channel_a)) )
-            grid_gt = floatX( np.zeros((in_shp*grid_size, in_shp*grid_size, n_channel_b)) )
-        else:
-            # a -> b -> a
-            grid = floatX( np.zeros((in_shp*grid_size, in_shp*grid_size, n_channel_a)) )
-            grid_gt = floatX( np.zeros((in_shp*grid_size, in_shp*grid_size, n_channel_a)) )            
-        this_A, this_B = itr.next()
+        grid = floatX( np.zeros((in_shp*grid_size, in_shp*grid_size*3, 3)) )
         ctr = 0
         for i in range(grid_size):
             for j in range(grid_size):
-                if ctr == itr.bs:
+                if (i==0 and j==0) or ctr == itr.bs:
                     # if we've used all the imgs in the batch, get a fresh new batch
                     this_A, this_B = itr.next()
+                    print this_A.shape, this_B.shape
+                    if mode == 'atob':
+                        img_A = this_A # a
+                        img_B = atob_fn(img_A) # a -> b
+                        img_C = btoa_fn(img_B) # b -> a
+                    else:
+                        img_A = this_B # b
+                        img_B = btoa_fn(img_A) # b -> a
+                        img_C = atob_fn(img_B) # a -> b
                     ctr = 0
-                aa,bb = slice(i*in_shp,(i+1)*in_shp), slice(j*in_shp,(j+1)*in_shp)
                 if mode == 'atob':
-                    target = atob_fn(this_A)
-                    grid_gt[aa, bb, :] = convert_to_rgb(this_A[ctr], self.is_a_grayscale)
-                    grid[aa, bb, :] = convert_to_rgb(target[ctr], self.is_b_grayscale)
+                    three_img = np.zeros((in_shp, in_shp*3, 3), dtype=grid.dtype)
+                    three_img[:,0:in_shp,:] = convert_to_rgb(img_A[ctr], self.is_a_grayscale)
+                    three_img[:,in_shp:(in_shp*2),:] = convert_to_rgb(img_B[ctr], self.is_b_grayscale)
+                    three_img[:,(in_shp*2):(in_shp*3),:] = convert_to_rgb(img_C[ctr], self.is_a_grayscale)
                 elif mode == 'btoa':
-                    target = btoa_fn(this_B)
-                    grid_gt[aa, bb, :] = convert_to_rgb(this_B[ctr], self.is_b_grayscale)
-                    grid[aa, bb, :] = convert_to_rgb(target[ctr], self.is_a_grayscale)
-                elif mode == 'atobtoa':
-                    target = btoa_fn(atob_fn(this_B))
-                    grid_gt[aa, bb, :] = convert_to_rgb(this_A[ctr], self.is_a_grayscale)
-                    grid[aa, bb, :] = convert_to_rgb(target[ctr], self.is_a_grayscale)
+                    three_img = np.zeros((in_shp, in_shp*3, 3), dtype=grid.dtype)
+                    three_img[:,0:in_shp,:] = convert_to_rgb(img_A[ctr], self.is_b_grayscale)
+                    three_img[:,in_shp:(in_shp*2),:] = convert_to_rgb(img_B[ctr], self.is_a_grayscale)
+                    three_img[:,(in_shp*2):(in_shp*3),:] = convert_to_rgb(img_C[ctr], self.is_b_grayscale)
+                grid[(i*in_shp):(i+1)*in_shp, (j*in_shp*3):((j+1)*in_shp*3), :] = three_img
                 ctr += 1
         from skimage.io import imsave
-        if grid.shape[-1] == 1:
-            grid = grid[:,:,0]
-        if grid_gt.shape[-1] == 1:
-            grid_gt = grid_gt[:,:,0]
         imsave(arr=grid,fname=out_filename)
-        if out_filename_gt != None:
-            imsave(arr=grid_gt,fname=out_filename_gt)

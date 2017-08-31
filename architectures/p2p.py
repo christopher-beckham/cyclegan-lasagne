@@ -9,6 +9,7 @@ from lasagne.objectives import *
 from keras.preprocessing.image import ImageDataGenerator
 import os
 import sys
+sys.path.append("..")
 from layers import BilinearUpsample2DLayer
 
 # custom layers
@@ -31,9 +32,114 @@ def UpsampleBilinear(layer, f, s=2):
     layer = Convolution(layer, f, s=1)
     return layer
 
+def resblock(layer, nf, s=1, decode=False):
+    left = layer
+    if not decode:
+        left = Convolution(left, f=nf, s=s)
+    else:
+        # upsample using bilinear sampling using the
+        # custom stride and have the conv's s=1
+        if s > 1:
+            left = BilinearUpsample2DLayer(left, s)
+        left = Convolution(left, f=nf, s=1)
+    left = BatchNormLayer(left)
+    left = NonlinearityLayer(left, leaky_rectify)
+    left = Convolution(left, f=nf, s=1) # shape-preserving, always
+    left = BatchNormLayer(left)
+    #
+    # traditionally, i padded feature maps,
+    # but here, we learn a projection
+    right_ds = layer
+    if not decode:
+        right_ds = Convolution(right_ds, k=1, f=nf, s=s)
+        right_ds = BatchNormLayer(right_ds)
+    else:
+        # upsample using bilinear sampling,
+        # then do the 1x1 convolution to match dims
+        # (don't stride the 1x1 conv, we already did
+        # that with the bilinear upsample)
+        right_ds = BilinearUpsample2DLayer(right_ds, s)
+        right_ds = Convolution(right_ds, k=1, f=nf, s=1)
+        right_ds = BatchNormLayer(right_ds)
+    add = ElemwiseSumLayer([left, right_ds])
+    add = NonlinearityLayer(add, leaky_rectify)
+    return add
+
+def conv_bn_relu(layer, nf, s=1, num_repeats=0):
+    conv = layer
+    for r in range(num_repeats+1):
+        if r==0:
+            conv = Convolution(conv, nf, s=s)
+        else:
+            conv = Convolution(conv, nf, s=1)
+        conv = BatchNormLayer(conv)
+        conv = NonlinearityLayer(conv, nonlinearity=leaky_rectify)
+    return conv
+
+def up_conv_bn_relu(layer, nf, num_repeats=0):
+    conv = layer
+    for r in range(num_repeats+1):
+        if r==0:
+            conv = UpsampleBilinear(conv, nf)
+        else:
+            conv = Convolution(conv, nf, s=1)
+        conv = BatchNormLayer(conv)
+        conv = NonlinearityLayer(conv, nonlinearity=leaky_rectify)
+    return conv
+
+def block9(in_shp, is_a_grayscale, is_b_grayscale, **kwargs):
+    i = InputLayer((None, 1 if is_a_grayscale else 3, in_shp, in_shp))
+    conv = i
+    conv = batch_norm(Conv2DLayer(conv, num_filters=32, filter_size=7, pad='same', nonlinearity=leaky_rectify)) # c7s1
+    conv = conv_bn_relu(conv, nf=64, s=2) # d64
+    conv = conv_bn_relu(conv, nf=128, s=2) # d128
+    for r in range(9):
+        conv = resblock(conv, nf=128, s=1) # R 128
+    conv = up_conv_bn_relu(conv, nf=64) # u64
+    conv = up_conv_bn_relu(conv, nf=32) # u32
+    conv = Conv2DLayer(conv, num_filters=1 if is_b_grayscale else 3, filter_size=7, pad='same',
+                       nonlinearity=sigmoid if is_b_grayscale else tanh) # c7s1
+    return conv
 
 
-def g_unet_256(in_shp, is_a_grayscale, is_b_grayscale, nf=64, mul_factor=[1,2,4,8,8,8,8,8], act=tanh, dropout=0., bilinear_upsample=False, disable_skip=False):
+def net_256_2_resblock(in_shp, is_a_grayscale, is_b_grayscale, nf=64, num_repeats=0, act=tanh):
+    i = InputLayer((None, 1 if is_a_grayscale else 3, in_shp, in_shp))
+    # 1,2,4,8,8,8,8,8
+    mf = [1,2,4]
+    enc = resblock(i, nf*mf[0], s=2) # 128
+    for r in range(num_repeats):
+        enc = resblock(enc, nf*mf[0], s=1)
+    #
+    enc = resblock(enc, nf*mf[1], s=2) # 64
+    for r in range(num_repeats):
+        enc = resblock(enc, nf*mf[1], s=1)
+    #
+    enc = resblock(enc, nf*mf[2], s=2) # 32
+    for r in range(num_repeats):
+        enc = resblock(enc, nf*mf[2], s=1)
+    x = enc
+    dec = x
+    # decode
+    dec = resblock(dec, nf*mf[1], s=2, decode=True) # 64
+    for r in range(num_repeats):
+        dec = resblock(dec, nf*mf[1], s=1, decode=True)
+    #
+    dec = resblock(dec, nf*mf[0], s=2, decode=True) # 128
+    for r in range(num_repeats):
+        dec = resblock(dec, nf*mf[0], s=1, decode=True)
+    #
+    dec = UpsampleBilinear(dec, 1 if is_b_grayscale else 3) # 256
+    dec = NonlinearityLayer(dec, act)
+    return dec
+
+def InstanceNormLayer(layer):
+    from custom_layers.normalization import StandardizationLayer
+    layer = StandardizationLayer(layer, axes='spatial')
+    layer = ScaleLayer(layer, shared_axes='auto')
+    layer = BiasLayer(layer, shared_axes='auto')
+    return layer
+
+def g_unet_256(in_shp, is_a_grayscale, is_b_grayscale, nf=64, mul_factor=[1,2,4,8,8,8,8,8], act=tanh, dropout_p=0., bilinear_upsample=False, instance_norm=False):
     """
     The UNet in Costa's pix2pix implementation with some added arguments.
     is_a_grayscale:
@@ -50,9 +156,8 @@ def g_unet_256(in_shp, is_a_grayscale, is_b_grayscale, nf=64, mul_factor=[1,2,4,
     else:
         ups = Deconvolution
     i = InputLayer((None, 1 if is_a_grayscale else 3, 256, 256))
-    mf = mul_factor
     
-
+    norm_layer = BatchNormLayer if not instance_norm else InstanceNormLayer
     
     # 1,2,4,8,8,8,8,8
 
@@ -60,86 +165,75 @@ def g_unet_256(in_shp, is_a_grayscale, is_b_grayscale, nf=64, mul_factor=[1,2,4,
     
     # in_ch x 256 x 256
     conv1 = Convolution(i, nf*mf[0])
-    conv1 = BatchNormLayer(conv1)
+    conv1 = norm_layer(conv1)
     x = NonlinearityLayer(conv1, nonlinearity=leaky_rectify)
     # nf x 128 x 128
     conv2 = Convolution(x, nf * mf[1])
-    conv2 = BatchNormLayer(conv2)
+    conv2 = norm_layer(conv2)
     x = NonlinearityLayer(conv2, nonlinearity=leaky_rectify)
     # nf*2 x 64 x 64
     conv3 = Convolution(x, nf * mf[2])
-    conv3 = BatchNormLayer(conv3)
+    conv3 = norm_layer(conv3)
     x = NonlinearityLayer(conv3, nonlinearity=leaky_rectify)
     # nf*4 x 32 x 32
     conv4 = Convolution(x, nf * mf[3])
-    conv4 = BatchNormLayer(conv4)
+    conv4 = norm_layer(conv4)
     x = NonlinearityLayer(conv4, nonlinearity=leaky_rectify)
     # nf*8 x 16 x 16
     conv5 = Convolution(x, nf * mf[4])
-    conv5 = BatchNormLayer(conv5)
+    conv5 = norm_layer(conv5)
     x = NonlinearityLayer(conv5, nonlinearity=leaky_rectify)
     # nf*8 x 8 x 8
     conv6 = Convolution(x, nf * mf[5])
-    conv6 = BatchNormLayer(conv6)
+    conv6 = norm_layer(conv6)
     x = NonlinearityLayer(conv6, nonlinearity=leaky_rectify)
     # nf*8 x 4 x 4
     conv7 = Convolution(x, nf * mf[6])
-    conv7 = BatchNormLayer(conv7)
+    conv7 = norm_layer(conv7)
     x = NonlinearityLayer(conv7, nonlinearity=leaky_rectify)
     # nf*8 x 2 x 2
     conv8 = Convolution(x, nf * mf[7], k=2, s=1, border_mode='valid')
-    conv8 = BatchNormLayer(conv8)
+    conv8 = norm_layer(conv8)
     x = NonlinearityLayer(conv8, nonlinearity=leaky_rectify)
     
     #dconv1 = Deconvolution(x, nf * 8,
     #                       k=2, s=1)
     dconv1 = Deconvolution(x, nf * mf[6], k=2, s=1)
-    dconv1 = BatchNormLayer(dconv1) #2x2
+    dconv1 = norm_layer(dconv1) #2x2
+    dconv1 = DropoutLayer(dconv1, p=dropout_p)
     x = concatenate_layers([dconv1, conv7])
-    if disable_skip:
-        x = dconv1
     x = NonlinearityLayer(x, nonlinearity=leaky_rectify)
     # nf*(8 + 8) x 2 x 2
     dconv2 = ups(x, nf * mf[5])
-    dconv2 = BatchNormLayer(dconv2)
-    x = concatenate_layers([dconv2, DropoutLayer(conv6, dropout) if dropout>0 else conv6])
-    if disable_skip:
-        x = dconv2
+    dconv2 = norm_layer(dconv2)
+    dconv2 = DropoutLayer(dconv2, p=dropout_p)
+    x = concatenate_layers([dconv2, conv6])
     x = NonlinearityLayer(x, leaky_rectify)
     # nf*(8 + 8) x 4 x 4
     dconv3 = ups(x, nf * mf[4])
-    dconv3 = BatchNormLayer(dconv3)
-    x = concatenate_layers([dconv3, DropoutLayer(conv5, dropout) if dropout>0 else conv5])
-    if disable_skip:
-        x = dconv3
+    dconv3 = norm_layer(dconv3)
+    dconv3 = DropoutLayer(dconv3, p=dropout_p)
+    x = concatenate_layers([dconv3, conv5])
     x = NonlinearityLayer(x, leaky_rectify)
     # nf*(8 + 8) x 8 x 8
     dconv4 = ups(x, nf * mf[3])
-    dconv4 = BatchNormLayer(dconv4)
-    x = concatenate_layers([dconv4, DropoutLayer(conv4, dropout) if dropout>0 else conv4])
-    if disable_skip:
-        x = dconv4
+    dconv4 = norm_layer(dconv4)
+    x = concatenate_layers([dconv4, conv4])
     x = NonlinearityLayer(x, leaky_rectify)
     # nf*(8 + 8) x 16 x 16
     dconv5 = ups(x, nf * mf[2])
-    dconv5 = BatchNormLayer(dconv5)
-    x = concatenate_layers([dconv5, DropoutLayer(conv3, dropout) if dropout>0 else conv3])
-    if disable_skip:
-        x = dconv5
+    dconv5 = norm_layer(dconv5)
+    x = concatenate_layers([dconv5, conv3])
     x = NonlinearityLayer(x, leaky_rectify)
     # nf*(8 + 8) x 32 x 32
     dconv6 = ups(x, nf * mf[1])
-    dconv6 = BatchNormLayer(dconv6)
-    x = concatenate_layers([dconv6, DropoutLayer(conv2, dropout) if dropout>0 else conv2])
-    if disable_skip:
-        x = dconv6
+    dconv6 = norm_layer(dconv6)
+    x = concatenate_layers([dconv6, conv2])
     x = NonlinearityLayer(x, leaky_rectify)
     # nf*(4 + 4) x 64 x 64
     dconv7 = ups(x, nf * mf[0])
-    dconv7 = BatchNormLayer(dconv7)
-    x = concatenate_layers([dconv7, DropoutLayer(conv1, dropout) if dropout>0 else conv1])
-    if disable_skip:
-        x = dconv7
+    dconv7 = norm_layer(dconv7)
+    x = concatenate_layers([dconv7, conv1])
     x = NonlinearityLayer(x, leaky_rectify)
     # nf*(2 + 2) x 128 x 128
     dconv9 = ups(x, 1 if is_b_grayscale else 3)
@@ -150,169 +244,19 @@ def g_unet_256(in_shp, is_a_grayscale, is_b_grayscale, nf=64, mul_factor=[1,2,4,
     return out
 
 
-
-def g_unet(in_shp, is_a_grayscale, is_b_grayscale, nf=64, dropout=False, num_repeats=0, bilinear_upsample=False):
-    """
-    The UNet in Costa's pix2pix implementation with some added arguments.
-    is_a_grayscale:
-    is_b_grayscale:
-    nf: multiplier for # feature maps
-    dropout: add 0.5 dropout to the first 3 conv-blocks in the decoder.
-      This is based on the architecture used in the original pix2pix paper.
-      No idea how it fares when combined with num_repeats...
-    num_repeats:
-    """
-    #assert in_shp in [512]
-    def padded_conv(nf, x):
-        x = Convolution(x, nf,s=1,k=3)
-        x = BatchNormLayer(x)
-        x = NonlinearityLayer(x, nonlinearity=leaky_rectify)
-        return x
-    i = InputLayer((None, 1 if is_a_grayscale else 3, in_shp, in_shp))
-    # in_ch x 512 x 512
-    conv1 = Convolution(i, nf)
-    conv1 = BatchNormLayer(conv1)
-    x = NonlinearityLayer(conv1, nonlinearity=leaky_rectify)
-    for r in range(num_repeats):
-        x = padded_conv(nf, x)    
-    # nf x 256 x 256
-    conv2 = Convolution(x, nf * 2)
-    conv2 = BatchNormLayer(conv2)
-    x = NonlinearityLayer(conv2, nonlinearity=leaky_rectify)
-    for r in range(num_repeats):
-        x = padded_conv(nf*2, x)
-    # nf*2 x 128 x 128
-    conv3 = Convolution(x, nf * 4)
-    conv3 = BatchNormLayer(conv3)
-    x = NonlinearityLayer(conv3, nonlinearity=leaky_rectify)
-    for r in range(num_repeats):
-        x = padded_conv(nf*4, x)
-    # nf*4 x 64 x 64
-    conv4 = Convolution(x, nf * 8)
-    conv4 = BatchNormLayer(conv4)
-    x = NonlinearityLayer(conv4, nonlinearity=leaky_rectify)
-    for r in range(num_repeats):
-        x = padded_conv(nf*8, x)
-    # nf*8 x 32 x 32
-    conv5 = Convolution(x, nf * 8)
-    conv5 = BatchNormLayer(conv5)
-    x = NonlinearityLayer(conv5, nonlinearity=leaky_rectify)
-    for r in range(num_repeats):
-        x = padded_conv(nf*8, x)
-    # nf*8 x 16 x 16
-    conv6 = Convolution(x, nf * 8)
-    conv6 = BatchNormLayer(conv6)
-    x = NonlinearityLayer(conv6, nonlinearity=leaky_rectify)
-    for r in range(num_repeats):
-        x = padded_conv(nf*8, x)
-    # nf*8 x 8 x 8
-    conv7 = Convolution(x, nf * 8)
-    conv7 = BatchNormLayer(conv7)
-    x = NonlinearityLayer(conv7, nonlinearity=leaky_rectify)
-    for r in range(num_repeats):
-        x = padded_conv(nf*8, x)
-    # nf*8 x 4 x 4
-    conv8 = Convolution(x, nf * 8)
-    conv8 = BatchNormLayer(conv8)
-    x = NonlinearityLayer(conv8, nonlinearity=leaky_rectify)
-    for r in range(num_repeats):
-        x = padded_conv(nf*8, x)
-    # nf*8 x 2 x 2
-    conv9 = Convolution(x, nf * 8, k=2, s=1, border_mode='valid')
-    conv9 = BatchNormLayer(conv9)
-    x = NonlinearityLayer(conv9, nonlinearity=leaky_rectify)
-    # nf*8 x 1 x 1  
-    dconv1 = Deconvolution(x, nf * 8,
-                           k=2, s=1)
-    dconv1 = BatchNormLayer(dconv1)
-    if dropout:
-        dconv1 = DropoutLayer(dconv1, p=0.5)
-    x = concatenate_layers([dconv1, conv8])
-    x = NonlinearityLayer(x, nonlinearity=leaky_rectify)
-    # nf*(8 + 8) x 2 x 2
-    if not bilinear_upsample:
-        dconv2 = Deconvolution(x, nf * 8)
-    else:
-        dconv2 = BilinearUpsample2DLayer(x, 2)
-        dconv2 = Convolution(dconv2, nf*8, s=1)
-    dconv2 = BatchNormLayer(dconv2)
-    if dropout:
-        dconv2 = DropoutLayer(dconv2, p=0.5)
-    x = concatenate_layers([dconv2, conv7])
-    x = NonlinearityLayer(x, leaky_rectify)
-    # nf*(8 + 8) x 4 x 4
-    if not bilinear_upsample:
-        dconv3 = Deconvolution(x, nf * 8)
-    else:
-        dconv3 = BilinearUpsample2DLayer(x, 2)
-        dconv3 = Convolution(dconv3, nf*8, s=1)
-    dconv3 = BatchNormLayer(dconv3)
-    if dropout:
-        dconv3 = DropoutLayer(dconv3, p=0.5)
-    x = concatenate_layers([dconv3, conv6])
-    x = NonlinearityLayer(x, leaky_rectify)
-    # nf*(8 + 8) x 8 x 8
-    if not bilinear_upsample:
-        dconv4 = Deconvolution(x, nf * 8)
-    else:
-        dconv4 = BilinearUpsample2DLayer(x, 2)
-        dconv4 = Convolution(dconv4, nf*8, s=1)
-    dconv4 = BatchNormLayer(dconv4)
-    x = concatenate_layers([dconv4, conv5])
-    x = NonlinearityLayer(x, leaky_rectify)
-    # nf*(8 + 8) x 16 x 16
-    if not bilinear_upsample:
-        dconv5 = Deconvolution(x, nf * 8)
-    else:
-        dconv5 = BilinearUpsample2DLayer(x, 2)
-        dconv5 = Convolution(dconv5, nf*8, s=1)        
-    dconv5 = BatchNormLayer(dconv5)
-    x = concatenate_layers([dconv5, conv4])
-    x = NonlinearityLayer(x, leaky_rectify)
-    # nf*(8 + 8) x 32 x 32
-    if not bilinear_upsample:
-        dconv6 = Deconvolution(x, nf * 4)
-    else:
-        dconv6 = BilinearUpsample2DLayer(x, 2)
-        dconv6 = Convolution(dconv6, nf*4, s=1)                
-    dconv6 = BatchNormLayer(dconv6)
-    x = concatenate_layers([dconv6, conv3])
-    x = NonlinearityLayer(x, leaky_rectify)
-    # nf*(4 + 4) x 64 x 64
-    if not bilinear_upsample:
-        dconv7 = Deconvolution(x, nf * 2)
-    else:
-        dconv7 = BilinearUpsample2DLayer(x, 2)
-        dconv7 = Convolution(dconv7, nf*2, s=1)
-    dconv7 = BatchNormLayer(dconv7)
-    x = concatenate_layers([dconv7, conv2])
-    x = NonlinearityLayer(x, leaky_rectify)
-    # nf*(2 + 2) x 128 x 128
-    if not bilinear_upsample:
-        dconv8 = Deconvolution(x, nf)
-    else:
-        dconv8 = BilinearUpsample2DLayer(x, 2)
-        dconv8 = Convolution(dconv8, nf, s=1)
-    dconv8 = BatchNormLayer(dconv8)
-    x = concatenate_layers([dconv8, conv1])
-    x = NonlinearityLayer(x, leaky_rectify)
-    # nf*(1 + 1) x 256 x 256
-    dconv9 = Deconvolution(x, 1 if is_b_grayscale else 3)
-    # out_ch x 512 x 512
-    act = sigmoid if is_b_grayscale else tanh
-    out = NonlinearityLayer(dconv9, act)
-    return out
-
-def discriminator(in_shp, is_grayscale, nf=32, act=sigmoid, mul_factor=[1,2,4,8], num_repeats=0, bn=False):
+def discriminator(in_shp, is_grayscale, nf=32, act=sigmoid, mul_factor=[1,2,4,8], strides=[2,2,2,2], num_repeats=0, instance_norm=False, stride_last_conv=True):
+    assert len(mul_factor) == len(strides)
     i = InputLayer((None, 1 if is_grayscale else 3, in_shp, in_shp))
     x = i
-    for m in mul_factor:
+    for i in range(len(mul_factor)):
         for r in range(num_repeats+1):
-            x = Convolution(x, nf*m, s=2 if r == 0 else 1)
+            x = Convolution(x, nf*mul_factor[i], s=strides[i] if r == 0 else 1)
             x = NonlinearityLayer(x, leaky_rectify)
-            if bn:
+            if not instance_norm:
                 x = BatchNormLayer(x)
-    x = Convolution(x, 1)
+            else:
+                x = InstanceNormLayer(x)
+    x = Convolution(x, 1, s=2 if stride_last_conv else 1)
     out = NonlinearityLayer(x, act)
     # 1 x 16 x 16
     return out
@@ -331,5 +275,5 @@ def fake_discriminator(in_shp, is_grayscale):
     return c
 
 if __name__ == '__main__':
-    l_out = g_unet(256, False, False)
+    l_out = block9(256, False, False)
     print l_out.output_shape
