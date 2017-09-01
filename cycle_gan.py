@@ -103,11 +103,6 @@ class CycleGAN():
         if no_gan:
             # if we turn off the GAN, we should only do cycle loss
             btoa_gen_total_loss = btoa_gen_cycle_loss
-        ## params
-        #gen_params_atob = get_all_params(atob['gen'], trainable=True)
-        #disc_params_atob = get_all_params(atob['disc'], trainable=True)
-        #gen_params_btoa = get_all_params(btoa['gen'], trainable=True)
-        #disc_params_btoa = get_all_params(btoa['disc'], trainable=True)
         gen_params = get_all_params(atob['gen'], trainable=True) + get_all_params(btoa['gen'], trainable=True)
         disc_params = get_all_params(atob['disc'], trainable=True) + get_all_params(btoa['disc'], trainable=True)
         # do da updates
@@ -176,7 +171,7 @@ class CycleGAN():
             os.makedirs(model_dir)
         if self.verbose:
             try:
-                from nolearn.lasagne.visualize import draw_to_file
+                from visualize import draw_to_file
                 draw_to_file(get_all_layers(self.atob['gen']), "%s/gen_atob.png" % out_dir, verbose=True)
                 draw_to_file(get_all_layers(self.atob['disc']), "%s/disc_atob.png" % out_dir, verbose=True)
                 draw_to_file(get_all_layers(self.btoa['gen']), "%s/gen_btoa.png" % out_dir, verbose=True)
@@ -254,7 +249,6 @@ class CycleGAN():
                 if (i==0 and j==0) or ctr == itr.bs:
                     # if we've used all the imgs in the batch, get a fresh new batch
                     this_A, this_B = itr.next()
-                    print this_A.shape, this_B.shape
                     if mode == 'atob':
                         img_A = this_A # a
                         img_B = atob_fn(img_A) # a -> b

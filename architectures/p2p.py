@@ -32,7 +32,7 @@ def UpsampleBilinear(layer, f, s=2):
     layer = Convolution(layer, f, s=1)
     return layer
 
-def resblock(layer, nf, s=1, decode=False):
+def resblock(layer, nf, s=1, norm_layer=BatchNormLayer, decode=False):
     left = layer
     if not decode:
         left = Convolution(left, f=nf, s=s)
@@ -42,11 +42,10 @@ def resblock(layer, nf, s=1, decode=False):
         if s > 1:
             left = BilinearUpsample2DLayer(left, s)
         left = Convolution(left, f=nf, s=1)
-    left = BatchNormLayer(left)
+    left = norm_layer(left)
     left = NonlinearityLayer(left, leaky_rectify)
     left = Convolution(left, f=nf, s=1) # shape-preserving, always
-    left = BatchNormLayer(left)
-    #
+    left = norm_layer(left)
     # traditionally, i padded feature maps,
     # but here, we learn a projection
     right_ds = layer
@@ -58,45 +57,39 @@ def resblock(layer, nf, s=1, decode=False):
         # then do the 1x1 convolution to match dims
         # (don't stride the 1x1 conv, we already did
         # that with the bilinear upsample)
+        raise Exception("...")
         right_ds = BilinearUpsample2DLayer(right_ds, s)
         right_ds = Convolution(right_ds, k=1, f=nf, s=1)
-        right_ds = BatchNormLayer(right_ds)
+        right_ds = norm_layer(right_ds)
     add = ElemwiseSumLayer([left, right_ds])
     add = NonlinearityLayer(add, leaky_rectify)
     return add
 
-def conv_bn_relu(layer, nf, s=1, num_repeats=0):
+def conv_bn_relu(layer, nf, s=1, norm_layer=BatchNormLayer):
     conv = layer
-    for r in range(num_repeats+1):
-        if r==0:
-            conv = Convolution(conv, nf, s=s)
-        else:
-            conv = Convolution(conv, nf, s=1)
-        conv = BatchNormLayer(conv)
-        conv = NonlinearityLayer(conv, nonlinearity=leaky_rectify)
+    conv = Convolution(conv, nf, s=s)
+    conv = norm_layer(conv)
+    conv = NonlinearityLayer(conv, nonlinearity=leaky_rectify)
     return conv
 
-def up_conv_bn_relu(layer, nf, num_repeats=0):
+def up_conv_bn_relu(layer, nf, norm_layer=BatchNormLayer):
     conv = layer
-    for r in range(num_repeats+1):
-        if r==0:
-            conv = UpsampleBilinear(conv, nf)
-        else:
-            conv = Convolution(conv, nf, s=1)
-        conv = BatchNormLayer(conv)
-        conv = NonlinearityLayer(conv, nonlinearity=leaky_rectify)
+    conv = Deconvolution(conv, nf)
+    conv = norm_layer(conv)
+    conv = NonlinearityLayer(conv, nonlinearity=leaky_rectify)
     return conv
 
-def block9(in_shp, is_a_grayscale, is_b_grayscale, **kwargs):
+def block9(in_shp, is_a_grayscale, is_b_grayscale, nf=64, instance_norm=False):
+    norm_layer = BatchNormLayer if not instance_norm else InstanceNormLayer
     i = InputLayer((None, 1 if is_a_grayscale else 3, in_shp, in_shp))
     conv = i
-    conv = batch_norm(Conv2DLayer(conv, num_filters=32, filter_size=7, pad='same', nonlinearity=leaky_rectify)) # c7s1
-    conv = conv_bn_relu(conv, nf=64, s=2) # d64
-    conv = conv_bn_relu(conv, nf=128, s=2) # d128
+    conv = norm_layer(Conv2DLayer(conv, num_filters=32, filter_size=7, pad='same', nonlinearity=leaky_rectify)) # c7s1
+    conv = conv_bn_relu(conv, nf=nf, s=2, norm_layer=norm_layer) # d64
+    conv = conv_bn_relu(conv, nf=nf*2, s=2, norm_layer=norm_layer) # d128
     for r in range(9):
-        conv = resblock(conv, nf=128, s=1) # R 128
-    conv = up_conv_bn_relu(conv, nf=64) # u64
-    conv = up_conv_bn_relu(conv, nf=32) # u32
+        conv = resblock(conv, nf=nf*4, s=1, norm_layer=norm_layer) # R 128
+    conv = up_conv_bn_relu(conv, nf=nf*2, norm_layer=norm_layer) # u64
+    conv = up_conv_bn_relu(conv, nf=nf, norm_layer=norm_layer) # u32
     conv = Conv2DLayer(conv, num_filters=1 if is_b_grayscale else 3, filter_size=7, pad='same',
                        nonlinearity=sigmoid if is_b_grayscale else tanh) # c7s1
     return conv

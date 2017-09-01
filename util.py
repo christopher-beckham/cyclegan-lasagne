@@ -72,14 +72,32 @@ class Hdf5Iterator():
     def next(self):
         return self.fn.next()
 
-def rnd_crop(img):
+# -----------------------------------------------------------
+    
+def rnd_crop(img, data_format='channels_last'):
+    assert data_format in ['channels_first', 'channels_last']
     from skimage.transform import resize
-    h, w = img.shape[0], img.shape[1]
+    if data_format == 'channels_last':
+        # (h, w, f)
+        h, w = img.shape[0], img.shape[1]
+    else:
+        # (f, h, w)
+        h, w = img.shape[1], img.shape[2]
     new_h, new_w = int(0.1*h + h), int(0.1*w + w)
+    # resize only works in the format (h, w, f)
+    if data_format == 'channels_first':
+        img = img.swapaxes(0,1).swapaxes(1,2)
+    # resize
     img_upsized = resize(img, (new_h, new_w))
+    # if channels first, swap back
+    if data_format == 'channels_first':
+        img_upsized = img_upsized.swapaxes(2,1).swapaxes(1,0)
     h_offset = np.random.randint(0, new_h-h)
     w_offset = np.random.randint(0, new_w-w)
-    final_img = img_upsized[h_offset:h_offset+h, w_offset:w_offset+w, :]
+    if data_format == 'channels_last':
+        final_img = img_upsized[h_offset:h_offset+h, w_offset:w_offset+w, :]
+    else:
+        final_img = img_upsized[:, h_offset:h_offset+h, w_offset:w_offset+w]
     return final_img
 
 def min_max_then_tanh(img):
@@ -96,7 +114,8 @@ class Hdf5InMemoryIterator():
     Assumes the data is in hdf5 format with dtype uint8 in the shape
     (n, h, w, 3).
     """
-    def __init__(self, X, y, bs, imgen, rnd_state=np.random.RandomState(0), random_crop=False):
+    def __init__(self, X, y, bs, imgen, rnd_state=np.random.RandomState(0), data_format='channels_first'):
+        assert data_format in ['channels_first', 'channels_last']
         self.X = X[:]
         self.y = y[:]
         self.imgen = imgen
@@ -104,7 +123,7 @@ class Hdf5InMemoryIterator():
         self.N = min(X.shape[0], y.shape[0])
         print "x shape = ", X.shape[0], "y shape = ", y.shape[0]
         self.bs = bs
-        self.random_crop = random_crop
+        self.data_format = data_format
         self.fn = self._iterate()
     def _iterate(self):
         X, y, bs = self.X, self.y, self.bs
@@ -122,8 +141,12 @@ class Hdf5InMemoryIterator():
                     seed = self.rnd_state.randint(0, 100000)
                     this_X = self.imgen.flow(this_X, None, batch_size=self.bs, seed=seed).next()
                     this_Y = self.imgen.flow(this_Y, None, batch_size=self.bs, seed=seed).next()
-                yield swap_axes(this_X), swap_axes(this_Y)
-
+                if self.data_format == 'channels_first':
+                    # if we gave this class images in the form (bs, f, h, w)
+                    # then we're good
+                    yield this_X, this_Y
+                else:
+                    yield swap_axes(this_X), swap_axes(this_Y)
     def __iter__(self):
         return self
     def next(self):
@@ -131,7 +154,7 @@ class Hdf5InMemoryIterator():
 
 
 class Hdf5TwoClassIterator():
-    def __init__(self, X, y, bs, imgen, c1s, c2s, tanh_norm=True, rnd_state=np.random.RandomState(0), debug=False):
+    def __init__(self, X, y, bs, imgen, c1s, c2s, rnd_state=np.random.RandomState(0), data_format='channels_first', debug=False):
         """
         :X: in our case, the heightmaps
         :y: in our case, the textures
@@ -150,8 +173,8 @@ class Hdf5TwoClassIterator():
         self.idxs_c1 = sorted(self.idxs_c1)
         self.idxs_c2 = sorted(self.idxs_c2)        
         if debug:
-            print "idxs_c1", idxs_c1, "length =", len(idxs_c1)
-            print "idxs_c2", idxs_c2, "length =", len(idxs_c2)
+            print "length c1 =", len(self.idxs_c1)
+            print "length c2 =", len(self.idxs_c2)
         # save slices
         self.slices_for_c1 = _get_slices(len(self.idxs_c1), bs)
         self.slices_for_c2 = _get_slices(len(self.idxs_c2), bs)
@@ -159,73 +182,11 @@ class Hdf5TwoClassIterator():
         self.N = min(len(self.idxs_c1), len(self.idxs_c2))
         self.bs = bs
         self.X = X
-        self.rnd_state = rnd_state
-        self.tanh_norm = tanh_norm
-        self.imgen = imgen
-        self.fn = self._iterate()
-    def _iterate(self):
-        while True:
-            if self.rnd_state != None:
-                self.rnd_state.shuffle(self.slices_for_c1)
-                self.rnd_state.shuffle(self.slices_for_c2)
-            for elem1,elem2 in zip(self.slices_for_c1, self.slices_for_c2):
-                this_X, this_Y = self.X[ self.idxs_c1[elem1] ], self.X[ self.idxs_c2[elem2] ]
-                if this_X.shape[0] != this_Y.shape[0]:
-                    # batch size mis-match, go to start of while loop
-                    break
-                if self.tanh_norm:
-                    # go between [0,1], then go to [-1, 1]
-                    norm_params = {'axis': (1,2,3), 'keepdims':True}
-                    this_X = (this_X - np.min(this_X,**norm_params)) / ( np.max(this_X,**norm_params) - np.min(this_X,**norm_params) )
-                    this_X = (this_X - 0.5) / 0.5
-                    this_Y = (this_Y - np.min(this_Y,**norm_params)) / ( np.max(this_Y,**norm_params) - np.min(this_Y,**norm_params) )
-                    this_Y = (this_Y - 0.5) / 0.5
-                    # if we passed an image generator, augment the images
-                if self.imgen != None:
-                    seed = self.rnd_state.randint(0, 100000)
-                    this_X = self.imgen.flow(this_X, None, batch_size=self.bs, seed=seed).next()
-                    this_Y = self.imgen.flow(this_Y, None, batch_size=self.bs, seed=seed).next()
-                yield this_X, this_Y
-    def __iter__(self):
-        return self
-    def next(self):
-        return self.fn.next()
-
-'''
-class Hdf5OneClassDebugIterator():
-    """
-    debug iterator
-    """
-    def __init__(self, X, y, bs, imgen, c1s, max_imgs=None, rnd_state=np.random.RandomState(0), debug=False):
-        """
-        :X: in our case, the heightmaps
-        :y: in our case, the textures
-        :bs:
-        :imgen:
-        :c1s:
-        :c2s
-        """
-        # build the list of indices corresponding to c1, and c2
-        self.idxs = []
-        for c1 in c1s:
-            self.idxs += np.where(y[:]==c1)[0].tolist()
-        self.idxs = sorted(self.idxs)
-        if max_imgs != None:
-            self.idxs = self.idxs[0:max_imgs]
-        self.idxs_c1 = self.idxs[0:len(self.idxs)//2]
-        self.idxs_c2 = self.idxs[len(self.idxs)//2::]
         if debug:
-            print "idxs_c1", self.idxs_c1, "length =", len(self.idxs_c1)
-            print "idxs_c2", self.idxs_c2, "length =", len(self.idxs_c2)
-        # save slices
-        self.slices_for_c1 = _get_slices(len(self.idxs_c1), bs)
-        self.slices_for_c2 = _get_slices(len(self.idxs_c2), bs)
-        # book-keeping
-        self.N = min(len(self.idxs_c1), len(self.idxs_c2))
-        self.bs = bs
-        self.X = X
+            print "X shape =", self.X.shape
         self.rnd_state = rnd_state
         self.imgen = imgen
+        self.data_format = data_format
         self.fn = self._iterate()
     def _iterate(self):
         while True:
@@ -237,38 +198,18 @@ class Hdf5OneClassDebugIterator():
                 if this_X.shape[0] != this_Y.shape[0]:
                     # batch size mis-match, go to start of while loop
                     break
-                # go between [0,1], then go to [-1, 1]
-                norm_params = {'axis': (1,2,3), 'keepdims':True}
-                this_X = (this_X - np.min(this_X,**norm_params)) / ( np.max(this_X,**norm_params) - np.min(this_X,**norm_params) )
-                this_X = (this_X - 0.5) / 0.5
-                this_Y = (this_Y - np.min(this_Y,**norm_params)) / ( np.max(this_Y,**norm_params) - np.min(this_Y,**norm_params) )
-                this_Y = (this_Y - 0.5) / 0.5
-                # add some black spots to the X images
-                sz = this_X.shape[-1]
-                extent = 30
-                for i in range(this_X.shape[0]):
-                    # add 3 black spots per image
-                    for r in range(3):
-                        x_rnd, y_rnd = np.random.randint(0, sz-extent), np.random.randint(0, sz-extent)
-                        noise_shp = this_X[i][:, y_rnd:y_rnd+extent, x_rnd:x_rnd+extent].shape
-                        this_X[i][:, y_rnd:y_rnd+extent, x_rnd:x_rnd+extent] = np.random.normal(0,0.2,size=noise_shp)
-                # if we passed an image generator, augment the images
                 if self.imgen != None:
                     seed = self.rnd_state.randint(0, 100000)
                     this_X = self.imgen.flow(this_X, None, batch_size=self.bs, seed=seed).next()
                     this_Y = self.imgen.flow(this_Y, None, batch_size=self.bs, seed=seed).next()
-                yield this_X, this_Y
+                if self.data_format == 'channels_first':
+                    yield this_X, this_Y
+                else:
+                    yield swap_axes(this_X), swap_axes(this_Y)
     def __iter__(self):
         return self
     def next(self):
-        return self.fn.next()
-'''
-
-
-
-
-
-    
+        return self.fn.next()    
         
 """
 Code borrowed from Pedro Costa's vess2ret repo:
@@ -335,21 +276,39 @@ if __name__ == '__main__':
 
     import h5py
 
-    def get_dr_iterators(batch_size):
+    def preproc_cl(img):
+        img = min_max_then_tanh(img)
+        img = rnd_crop(img, 'channels_last')
+        return img
+
+    def preproc_cf(img):
+        img = min_max_then_tanh(img)
+        img = rnd_crop(img, 'channels_first')
+        return img
+    
+    def get_dr_iterators():
         dr_h5 = "/data/lisatmp4/beckhamc/hdf5/dr.h5"
         dataset = h5py.File(dr_h5,"r")
-        imgen = ImageDataGenerator(horizontal_flip=True, vertical_flip=True)
+        imgen = ImageDataGenerator(horizontal_flip=True, vertical_flip=True,
+                                   preprocessing_function=preproc_cf,
+                                   data_format='channels_first')
         # c1 has latent factor of interest, i.e. Au
         # c2 doesn't have factor of interest, i.e. B0
+        bs = 32
         it_train = Hdf5TwoClassIterator(X=dataset['xt'], y=dataset['yt'],
-                                     bs=batch_size, imgen=imgen, c1s=(3,4), c2s=(0,),
-                                     rnd_state=np.random.RandomState(0),
-                                     tanh_norm=True)
+                                     bs=32, imgen=imgen, c1s=(3,4), c2s=(0,),
+                                    rnd_state=np.random.RandomState(0), debug=True)
         it_val = Hdf5TwoClassIterator(X=dataset['xv'], y=dataset['yv'],
-                                     bs=batch_size, imgen=imgen, c1s=(3,4), c2s=(0,),
-                                     rnd_state=np.random.RandomState(0),
-                                     tanh_norm=True)
-        return it_train, it_val
+                                     bs=32, imgen=imgen, c1s=(3,4), c2s=(0,),
+                                     rnd_state=np.random.RandomState(0))
+        a,b = it_train.next()
+        print a.shape, b.shape
+        print np.min(a), np.max(a)
+        print np.min(b), np.max(b)
+        from skimage.io import imsave
+        for i in range(len(a)):
+            imsave(arr=convert_to_rgb(a[i]), fname="tmp/a%i.png" % i)
+            imsave(arr=convert_to_rgb(b[i]), fname="tmp/b%i.png" % i)
 
     def get_horse_iterators(batch_size):
         dr_h5 = "/data/lisatmp4/beckhamc/hdf5/horse2zebra.h5"
@@ -386,18 +345,15 @@ if __name__ == '__main__':
 
     def test_horse_in_memory_iterator():
         h5 = h5py.File("/data/lisatmp4/beckhamc/hdf5/horse2zebra_uint8.h5","r")
-        def preproc(img):
-            print img.shape
-            img = min_max_then_tanh(img)
-            img = rnd_crop(img)
-            return img
-        imgen = ImageDataGenerator(horizontal_flip=True,
-                                   preprocessing_function=preproc, data_format='channels_last',)
+        imgen = ImageDataGenerator(horizontal_flip=True, 
+                                   preprocessing_function=preproc_cl,
+                                   data_format='channels_last')
         itr = Hdf5InMemoryIterator(X=h5['trainA'], y=h5['trainB'],
                                    bs=32,
                                    imgen=imgen,
-                                   random_crop=True)
+                                   data_format='channels_last')
         a,b = itr.next()
+        print a.shape, b.shape
         from skimage.io import imsave
         for i in range(1):
             imsave(arr=convert_to_rgb(a[i]), fname="tmp/a%i.png" % i)
