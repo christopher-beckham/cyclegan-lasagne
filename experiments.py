@@ -43,21 +43,25 @@ if __name__ == '__main__':
         batch_size:
         more_classes:
         """
+        def preproc(img):
+            img = util.min_max_then_tanh(img, )
+            img = util.rnd_crop(img, data_format='channels_first')
+            return img
         dr_h5 = "/data/lisatmp4/beckhamc/hdf5/dr.h5"
         if more_classes:
             c1s = (4,3)
         else:
             c1s = (4,)
         dataset = h5py.File(dr_h5,"r")
-        imgen = ImageDataGenerator(horizontal_flip=True, vertical_flip=True)
+        imgen = ImageDataGenerator(horizontal_flip=True, vertical_flip=True, data_format='channels_first', preprocessing_function=preproc)
         it_train = Hdf5TwoClassIterator(X=dataset['xt'], y=dataset['yt'],
                                      bs=batch_size, imgen=imgen, c1s=c1s, c2s=(0,),
                                      rnd_state=np.random.RandomState(0),
-                                     tanh_norm=True)
+                                     data_format='channels_first')
         it_val = Hdf5TwoClassIterator(X=dataset['xv'], y=dataset['yv'],
                                      bs=batch_size, imgen=imgen, c1s=c1s, c2s=(0,),
                                      rnd_state=np.random.RandomState(0),
-                                     tanh_norm=True)
+                                     data_format='channels_first')
         return it_train, it_val
 
 
@@ -90,21 +94,21 @@ if __name__ == '__main__':
                                 is_b_grayscale=False, is_uint8=True)
         return it_train, it_val
 
-    def preproc(img):
-        img = util.min_max_then_tanh(img)
-        img = util.rnd_crop(img)
-        return img
     
     def get_horse_iterators_in_memory(batch_size):
+        def preproc(img):
+            img = util.min_max_then_tanh(img)
+            img = util.rnd_crop(img)
+            return img
         dr_h5 = "/data/lisatmp4/beckhamc/hdf5/horse2zebra_uint8.h5"
         dataset = h5py.File(dr_h5,"r")
         imgen = ImageDataGenerator(horizontal_flip=True,
                                    preprocessing_function=preproc,
                                    data_format='channels_last')
         it_train = Hdf5InMemoryIterator(X=dataset['trainA'], y=dataset['trainB'],
-                                        bs=batch_size, imgen=imgen)
+                                        bs=batch_size, imgen=imgen, data_format='channels_last')
         it_val = Hdf5InMemoryIterator(X=dataset['testA'], y=dataset['testB'],
-                                      bs=batch_size, imgen=imgen)
+                                      bs=batch_size, imgen=imgen, data_format='channels_last')
         return it_train, it_val
 
     
@@ -1028,6 +1032,9 @@ if __name__ == '__main__':
 
 
     def horse_block9_64_lamb10_d64_inormboth_b1_dconv_inmem_d5_weakd(mode):
+        """
+        This implementation works. **USE THIS AS A REFERENCE**
+        """
         debug = False
         if debug:
             p2p.g_unet_256 = p2p.fake_generator
@@ -1047,7 +1054,7 @@ if __name__ == '__main__':
             in_shp=256,
             is_a_grayscale=False, is_b_grayscale=False,
             alpha_atob=10., alpha_btoa=10.,
-            lsgan=True,
+            mode='lsgan',
             opt=adam, opt_args={'learning_rate':theano.shared(floatX(2e-4)), 'beta1': 0.5},
             reconstruction='l1',
         )
@@ -1056,6 +1063,203 @@ if __name__ == '__main__':
             model.train(it_train, it_val, batch_size=bs, num_epochs=200, out_dir="output/%s" % name, model_dir="models/%s" % name, decay_lr=(100,200))
 
 
+
+
+    def dr_block9_64_lamb10_d64_inormboth_b1_dconv_inmem_d5_weakd_wgan(mode):
+        """
+        """
+        debug = False
+        if debug:
+            p2p.g_unet_256 = p2p.fake_generator
+            p2p.discriminator = p2p.fake_discriminator
+            gen_params = {}
+            disc_params = {}
+        else:
+            gen_params = {'instance_norm':True, 'nf':64}
+            disc_params = {'nf':64, 'instance_norm':True, 'num_repeats':0, 'act':linear, 'mul_factor':[1,2,4,8], 'strides':[2,2,2,1], 'stride_last_conv':False}
+        bs = 4
+        it_train, it_val = get_dr_iterators(bs)
+        model = CycleGAN(
+            gen_fn_atob=p2p.block9_fixed, disc_fn_a=p2p.discriminator,
+            gen_params_atob=gen_params, disc_params_a=disc_params, 
+            gen_fn_btoa=p2p.block9_fixed, disc_fn_b=p2p.discriminator,
+            gen_params_btoa=gen_params, disc_params_b=disc_params,
+            in_shp=256,
+            is_a_grayscale=False, is_b_grayscale=False,
+            alpha_atob=10., alpha_btoa=10.,
+            mode='wgan',
+            opt=rmsprop, opt_args={'learning_rate':theano.shared(floatX(5e-5))},
+            reconstruction='l1'
+        )
+        name = "dr_block9-64_lamb10_d64_inormboth_b1-0.5_dconv_inmem_d5_joint_rc_weakd_wgan"
+        if mode == "train":
+            model.train(it_train, it_val, batch_size=bs, num_epochs=200, out_dir="output/%s" % name, model_dir="models/%s" % name, decay_lr=(100,200))
+
+
+
+
+    def dr_block9_64_lamb110_d64_inormboth_b1_dconv_inmem_d5_weakd(mode):
+        """
+        """
+        debug = False
+        if debug:
+            p2p.g_unet_256 = p2p.fake_generator
+            p2p.discriminator = p2p.fake_discriminator
+            gen_params = {}
+            disc_params = {}
+        else:
+            gen_params = {'instance_norm':True, 'nf':64}
+            disc_params = {'nf':64, 'instance_norm':True, 'num_repeats':0, 'act':linear, 'mul_factor':[1,2,4,8], 'strides':[2,2,2,1], 'stride_last_conv':False}
+        bs = 4
+        it_train, it_val = get_dr_iterators(bs)
+        model = CycleGAN(
+            gen_fn_atob=p2p.block9_fixed, disc_fn_a=p2p.discriminator,
+            gen_params_atob=gen_params, disc_params_a=disc_params, 
+            gen_fn_btoa=p2p.block9_fixed, disc_fn_b=p2p.discriminator,
+            gen_params_btoa=gen_params, disc_params_b=disc_params,
+            in_shp=256,
+            is_a_grayscale=False, is_b_grayscale=False,
+            alpha_atob=1., alpha_btoa=10.,
+            mode='lsgan',
+            opt=adam, opt_args={'learning_rate':theano.shared(floatX(2e-4)),'beta1':0.5},
+            reconstruction='l1'
+        )
+        name = "dr_block9-64_lamb1-10_d64_inormboth_b1-0.5_dconv_inmem_d5_joint_rc_weakd"
+        if mode == "train":
+            model.train(it_train, it_val, batch_size=bs, num_epochs=200, out_dir="output/%s" % name, model_dir="models/%s" % name, decay_lr=(100,200))
+
+
+            
+
+
+    def dr_block9_64_lamb10_d64_inormboth_b1_dconv_inmem_d5_weakd_clip01(mode):
+        """
+        """
+        debug = False
+        if debug:
+            p2p.g_unet_256 = p2p.fake_generator
+            p2p.discriminator = p2p.fake_discriminator
+            gen_params = {}
+            disc_params = {}
+        else:
+            gen_params = {'instance_norm':True, 'nf':64}
+            disc_params = {'nf':64, 'instance_norm':True, 'num_repeats':0, 'act':linear, 'mul_factor':[1,2,4,8], 'strides':[2,2,2,1], 'stride_last_conv':False}
+        bs = 4
+        it_train, it_val = get_dr_iterators(bs)
+        model = CycleGAN(
+            gen_fn_atob=p2p.block9_fixed, disc_fn_a=p2p.discriminator,
+            gen_params_atob=gen_params, disc_params_a=disc_params, 
+            gen_fn_btoa=p2p.block9_fixed, disc_fn_b=p2p.discriminator,
+            gen_params_btoa=gen_params, disc_params_b=disc_params,
+            in_shp=256,
+            is_a_grayscale=False, is_b_grayscale=False,
+            alpha_atob=10., alpha_btoa=10.,
+            mode='lsgan',
+            opt=adam, opt_args={'learning_rate':theano.shared(floatX(2e-4)),'beta1':0.5},
+            reconstruction='l1',
+            clip_d=0.01
+        )
+        name = "dr_block9-64_lamb10_d64_inormboth_b1-0.5_dconv_inmem_d5_joint_rc_weakd_clip0.01"
+        if mode == "train":
+            model.train(it_train, it_val, batch_size=bs, num_epochs=200, out_dir="output/%s" % name, model_dir="models/%s" % name, decay_lr=(100,200))
+
+
+
+
+    def dr_block9_64_lamb10_d32_inormboth_b1_dconv_inmem_d5_weakd(mode):
+        """
+        """
+        debug = False
+        if debug:
+            p2p.g_unet_256 = p2p.fake_generator
+            p2p.discriminator = p2p.fake_discriminator
+            gen_params = {}
+            disc_params = {}
+        else:
+            gen_params = {'instance_norm':True, 'nf':64}
+            disc_params = {'nf':32, 'instance_norm':True, 'num_repeats':0, 'act':linear, 'mul_factor':[1,2,4,8], 'strides':[2,2,2,1], 'stride_last_conv':False}
+        bs = 4
+        it_train, it_val = get_dr_iterators(bs)
+        model = CycleGAN(
+            gen_fn_atob=p2p.block9_fixed, disc_fn_a=p2p.discriminator,
+            gen_params_atob=gen_params, disc_params_a=disc_params, 
+            gen_fn_btoa=p2p.block9_fixed, disc_fn_b=p2p.discriminator,
+            gen_params_btoa=gen_params, disc_params_b=disc_params,
+            in_shp=256,
+            is_a_grayscale=False, is_b_grayscale=False,
+            alpha_atob=10., alpha_btoa=10.,
+            mode='lsgan',
+            opt=adam, opt_args={'learning_rate':theano.shared(floatX(2e-4)),'beta1':0.5},
+            reconstruction='l1',
+        )
+        name = "dr_block9-64_lamb10_d32_inormboth_b1-0.5_dconv_inmem_d5_joint_rc_weakd"
+        if mode == "train":
+            model.train(it_train, it_val, batch_size=bs, num_epochs=200, out_dir="output/%s" % name, model_dir="models/%s" % name, decay_lr=(100,200))
+
+
+    def dr_block9_64_lamb5_d32_inormboth_b1_dconv_inmem_d5_weakd(mode):
+        """
+        """
+        debug = False
+        if debug:
+            p2p.g_unet_256 = p2p.fake_generator
+            p2p.discriminator = p2p.fake_discriminator
+            gen_params = {}
+            disc_params = {}
+        else:
+            gen_params = {'instance_norm':True, 'nf':64}
+            disc_params = {'nf':32, 'instance_norm':True, 'num_repeats':0, 'act':linear, 'mul_factor':[1,2,4,8], 'strides':[2,2,2,1], 'stride_last_conv':False}
+        bs = 4
+        it_train, it_val = get_dr_iterators(bs)
+        model = CycleGAN(
+            gen_fn_atob=p2p.block9_fixed, disc_fn_a=p2p.discriminator,
+            gen_params_atob=gen_params, disc_params_a=disc_params, 
+            gen_fn_btoa=p2p.block9_fixed, disc_fn_b=p2p.discriminator,
+            gen_params_btoa=gen_params, disc_params_b=disc_params,
+            in_shp=256,
+            is_a_grayscale=False, is_b_grayscale=False,
+            alpha_atob=5., alpha_btoa=5.,
+            mode='lsgan',
+            opt=adam, opt_args={'learning_rate':theano.shared(floatX(2e-4)),'beta1':0.5},
+            reconstruction='l1',
+        )
+        name = "dr_block9-64_lamb5_d32_inormboth_b1-0.5_dconv_inmem_d5_joint_rc_weakd"
+        if mode == "train":
+            model.train(it_train, it_val, batch_size=bs, num_epochs=200, out_dir="output/%s" % name, model_dir="models/%s" % name, decay_lr=(100,200))
+            
+
+
+            
+    def horse_block9_64_lamb10_d64_inormboth_b1_dconv_inmem_d5_weakd_wgan(mode):
+        """
+        This implementation works. **USE THIS AS A REFERENCE**
+        """
+        debug = False
+        if debug:
+            p2p.g_unet_256 = p2p.fake_generator
+            p2p.discriminator = p2p.fake_discriminator
+            gen_params = {}
+            disc_params = {}
+        else:
+            gen_params = {'instance_norm':True, 'nf':64}
+            disc_params = {'nf':64, 'instance_norm':True, 'num_repeats':0, 'act':linear, 'mul_factor':[1,2,4,8], 'strides':[2,2,2,1], 'stride_last_conv':False}
+        bs = 4
+        it_train, it_val = get_horse_iterators_in_memory(bs)
+        model = CycleGAN(
+            gen_fn_atob=p2p.block9, disc_fn_a=p2p.discriminator,
+            gen_params_atob=gen_params, disc_params_a=disc_params, 
+            gen_fn_btoa=p2p.block9, disc_fn_b=p2p.discriminator,
+            gen_params_btoa=gen_params, disc_params_b=disc_params,
+            in_shp=256,
+            is_a_grayscale=False, is_b_grayscale=False,
+            alpha_atob=10., alpha_btoa=10.,
+            mode='wgan',
+            opt=rmsprop, opt_args={'learning_rate':theano.shared(floatX(5e-5))},
+            reconstruction='l1',
+        )
+        name = "horse_block9-64_lamb10_d64_inormboth_b1-0.5_dconv_inmem_d5_joint_rc_weakd_wgan_rms"
+        if mode == "train":
+            model.train(it_train, it_val, batch_size=bs, num_epochs=200, out_dir="output/%s" % name, model_dir="models/%s" % name, decay_lr=(100,200))
             
             
 

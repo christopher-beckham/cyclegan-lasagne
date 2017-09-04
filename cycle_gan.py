@@ -33,13 +33,14 @@ class CycleGAN():
                  gen_params_btoa, disc_params_b,
                  in_shp, is_a_grayscale, is_b_grayscale,
                  alpha_atob=100., alpha_btoa=100., opt=adam, opt_args={'learning_rate':theano.shared(floatX(1e-3))},
-                 reconstruction='l1', lsgan=False, no_gan=False, verbose=True):
+                 reconstruction='l1', mode='lsgan', clip_d=None, no_gan=False, verbose=True):
         self.is_a_grayscale = is_a_grayscale
         self.is_b_grayscale = is_b_grayscale
         self.in_shp = in_shp
         self.verbose = verbose
         #
         assert reconstruction in ['l1', 'l2']
+        assert mode in ['lsgan', 'wgan']
         if reconstruction == 'l2':  
             self.recon_error = squared_error
         else:
@@ -76,17 +77,20 @@ class CycleGAN():
         self.atob = atob
         self.btoa = btoa
         # loss functions
-        if lsgan:
-            adv_loss = squared_error
-        else:
-            adv_loss = binary_crossentropy
+        self.mode = mode
         if self.verbose:
             print "creating losses..."
         # we assume that the discriminator D(x)/D(y) is the prob that x/y is real
         ## atob losses
         # adversarial loss
-        atob_disc_loss = adv_loss(atob['disc_out_real'], 1.).mean() + adv_loss(atob['disc_out_fake'], 0.).mean()
-        atob_gen_loss = adv_loss(atob['disc_out_fake'], 1.).mean()
+        if mode == 'lsgan':
+            atob_disc_loss = squared_error(atob['disc_out_real'], 1.).mean() + squared_error(atob['disc_out_fake'], 0.).mean()
+            atob_gen_loss = squared_error(atob['disc_out_fake'], 1.).mean()
+        else:
+            # TODO: wgan does not train discriminator for more iters than the generator,
+            # and this is just vanilla wgan
+            atob_disc_loss = atob['disc_out_fake'].mean() - atob['disc_out_real'].mean()
+            atob_gen_loss = -atob['disc_out_fake'].mean()
         # forward cycle consistency loss
         atob_gen_cycle_loss = self.recon_error(A, atob['cycle']).mean()
         atob_gen_total_loss = atob_gen_loss + float(alpha_atob)*atob_gen_cycle_loss
@@ -95,8 +99,12 @@ class CycleGAN():
             atob_gen_total_loss = atob_gen_cycle_loss
         ## btoa losses
         # adversarial loss
-        btoa_disc_loss = adv_loss(btoa['disc_out_real'], 1.).mean() + adv_loss(btoa['disc_out_fake'], 0.).mean()
-        btoa_gen_loss = adv_loss(btoa['disc_out_fake'], 1.).mean()
+        if mode == 'lsgan':
+            btoa_disc_loss = squared_error(btoa['disc_out_real'], 1.).mean() + squared_error(btoa['disc_out_fake'], 0.).mean()
+            btoa_gen_loss = squared_error(btoa['disc_out_fake'], 1.).mean()
+        else:
+            btoa_disc_loss = btoa['disc_out_fake'].mean() - btoa['disc_out_real'].mean()
+            btoa_gen_loss = -btoa['disc_out_fake'].mean()
         # backward cycle consistency loss
         btoa_gen_cycle_loss = self.recon_error(B, btoa['cycle']).mean()
         btoa_gen_total_loss = btoa_gen_loss + float(alpha_btoa)*btoa_gen_cycle_loss ####
@@ -110,7 +118,12 @@ class CycleGAN():
             print "creating updates..."
         updates = opt(atob_gen_total_loss + btoa_gen_total_loss, gen_params, **opt_args) # update generators
         if not no_gan:
-            updates.update(opt(atob_disc_loss + btoa_disc_loss, disc_params, **opt_args)) # update disc
+            disc_updates = opt(atob_disc_loss + btoa_disc_loss, disc_params, **opt_args) # update disc
+        if clip_d != None:
+            for param in get_all_params(atob['disc'], trainable=True, regularizable=True) + get_all_params(btoa['disc'], trainable=True, regularizable=True):
+                disc_updates[param] = T.clip(disc_updates[param], -clip_d, clip_d)
+        if not no_gan:
+            updates.update(disc_updates)
         # do da functions
         if self.verbose:
             print "creating fns..."

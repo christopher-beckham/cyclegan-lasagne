@@ -80,6 +80,11 @@ def up_conv_bn_relu(layer, nf, norm_layer=BatchNormLayer):
     return conv
 
 def block9(in_shp, is_a_grayscale, is_b_grayscale, nf=64, instance_norm=False):
+    """
+    Implementation used for horses/zebra dataset. This one has a bug where in
+    the encoder portion of the network the number of filters is [32, nf*2, nf*4],
+    whereas this should be [nf, nf*2, nf*4]. Use `block9_fixed` instead.
+    """
     norm_layer = BatchNormLayer if not instance_norm else InstanceNormLayer
     i = InputLayer((None, 1 if is_a_grayscale else 3, in_shp, in_shp))
     conv = i
@@ -93,6 +98,25 @@ def block9(in_shp, is_a_grayscale, is_b_grayscale, nf=64, instance_norm=False):
     conv = Conv2DLayer(conv, num_filters=1 if is_b_grayscale else 3, filter_size=7, pad='same',
                        nonlinearity=sigmoid if is_b_grayscale else tanh) # c7s1
     return conv
+
+
+def block9_fixed(in_shp, is_a_grayscale, is_b_grayscale, nf=64, instance_norm=False):
+    norm_layer = BatchNormLayer if not instance_norm else InstanceNormLayer
+    i = InputLayer((None, 1 if is_a_grayscale else 3, in_shp, in_shp))
+    conv = i
+    conv = norm_layer(Conv2DLayer(conv, num_filters=nf, filter_size=7, pad='same', nonlinearity=leaky_rectify)) # c7s1
+    conv = conv_bn_relu(conv, nf=nf*2, s=2, norm_layer=norm_layer) # d64
+    conv = conv_bn_relu(conv, nf=nf*4, s=2, norm_layer=norm_layer) # d128
+    for r in range(9):
+        conv = resblock(conv, nf=nf*4, s=1, norm_layer=norm_layer) # R 128
+    conv = up_conv_bn_relu(conv, nf=nf*2, norm_layer=norm_layer) # u64
+    conv = up_conv_bn_relu(conv, nf=nf, norm_layer=norm_layer) # u32
+    conv = Conv2DLayer(conv, num_filters=1 if is_b_grayscale else 3, filter_size=7, pad='same',
+                       nonlinearity=sigmoid if is_b_grayscale else tanh) # c7s1
+    return conv
+
+
+
 
 
 def net_256_2_resblock(in_shp, is_a_grayscale, is_b_grayscale, nf=64, num_repeats=0, act=tanh):
